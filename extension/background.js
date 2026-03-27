@@ -208,10 +208,24 @@ async function injectAndRun(tabId, func, args = [], world = "ISOLATED") {
 // ============================================================
 
 // Cursor CSS + SVG injected into page (shared by all cursor helpers)
-const CURSOR_CSS = `.__bmcp-cursor{position:fixed;z-index:2147483647;pointer-events:none;width:28px;height:28px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.35))}.__bmcp-ripple{position:fixed;z-index:2147483646;pointer-events:none;width:0;height:0;border-radius:50%;background:radial-gradient(circle,rgba(59,130,246,.5) 0%,rgba(59,130,246,0) 70%);transform:translate(-50%,-50%);animation:__bmcp-rg .35s ease-out forwards}@keyframes __bmcp-rg{0%{width:0;height:0;opacity:1}100%{width:60px;height:60px;opacity:0}}`;
+const CURSOR_CSS = `
+.__bmcp-cursor{
+  position:fixed;z-index:2147483647;pointer-events:none;
+  width:28px;height:28px;
+  filter:drop-shadow(0 3px 10px rgba(0,0,0,.4));
+  transition:left .42s cubic-bezier(.34,1.56,.64,1),top .42s cubic-bezier(.34,1.56,.64,1),opacity .22s ease,transform .12s ease;
+  transform-origin:4px 2px;
+}
+.__bmcp-cursor.--press{transform:scale(.72) rotate(-6deg)}
+.__bmcp-ripple{position:fixed;z-index:2147483646;pointer-events:none;border-radius:50%;transform:translate(-50%,-50%)}
+.__bmcp-ripple.--fill{width:0;height:0;background:radial-gradient(circle,rgba(59,130,246,.48) 0%,rgba(59,130,246,0) 70%);animation:__bmcp-rf .52s ease-out forwards}
+.__bmcp-ripple.--ring{width:0;height:0;border:2px solid rgba(59,130,246,.5);animation:__bmcp-rr .6s ease-out .05s forwards}
+@keyframes __bmcp-rf{0%{width:0;height:0;opacity:1}100%{width:72px;height:72px;opacity:0}}
+@keyframes __bmcp-rr{0%{width:0;height:0;opacity:.75}100%{width:58px;height:58px;opacity:0}}
+`;
 const CURSOR_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><path d="M5 2L5 24L11 18L18 26L22 23L15 15L23 15Z" fill="#fff" stroke="#222" stroke-width="1.5" stroke-linejoin="round"/></svg>';
 
-// Step 1: inject cursor visuals at target element, await to ensure paint
+// Inject cursor that glides to the target element from the previous cursor position
 async function injectCursor(tabId, selector, selectorType = "css") {
   await injectAndRun(tabId, (sel, selType, css, svg) => {
     let el;
@@ -227,21 +241,35 @@ async function injectCursor(tabId, selector, selectorType = "css") {
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const tx = rect.left + rect.width / 2, ty = rect.top + rect.height / 2;
+
     document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove());
     const s = document.createElement("style"); s.className = "__bmcp-cursor-style";
     s.textContent = css; document.head.appendChild(s);
+
+    // Glide from last known cursor position, or from above the target if first time
+    const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 100, 0) };
+    window.__bmcp_cursorPos = { x: tx, y: ty };
+
     const c = document.createElement("div"); c.className = "__bmcp-cursor";
     c.innerHTML = svg;
-    c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px"; document.body.appendChild(c);
-    const r = document.createElement("div"); r.className = "__bmcp-ripple";
-    r.style.left = tx + "px"; r.style.top = ty + "px"; document.body.appendChild(r);
-    el.style.outline = "2px solid rgba(59,130,246,0.7)"; el.style.outlineOffset = "2px";
-    setTimeout(() => { el.style.outline = ""; el.style.outlineOffset = ""; }, 350);
-    setTimeout(() => { c.style.opacity = "0"; }, 400);
-    setTimeout(() => { document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove()); }, 700);
+    c.style.left = (prev.x - 5) + "px"; c.style.top = (prev.y - 2) + "px";
+    c.style.opacity = "0";
+    document.body.appendChild(c);
+
+    requestAnimationFrame(() => {
+      c.style.opacity = "1";
+      c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px";
+    });
+
+    // Element pulse highlight
+    el.style.outline = "2px solid rgba(59,130,246,0.65)"; el.style.outlineOffset = "2px";
+    setTimeout(() => { el.style.outline = ""; el.style.outlineOffset = ""; }, 500);
+
+    setTimeout(() => { c.style.opacity = "0"; }, 580);
+    setTimeout(() => { document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove()); }, 820);
   }, [selector, selectorType, CURSOR_CSS, CURSOR_SVG]).catch(() => {});
-  // Wait for browser to paint the cursor before the click navigates away
-  await new Promise(r => setTimeout(r, 150));
+  // Wait enough for glide to visually land before the action fires
+  await new Promise(r => setTimeout(r, 280));
 }
 
 // Fire-and-forget version for non-navigating actions (type, hover, select)
@@ -281,22 +309,46 @@ handlers.close_tab = async ({ tabId }) => { await chrome.tabs.remove(tabId); ret
 handlers.click = async ({ selector, tabId }) => {
   return await injectAndRun(tabId, (sel, css, svg) => {
     const el = document.querySelector(sel); if (!el) throw new Error(`Element not found: ${sel}`);
-    // Show cursor + ripple
     const rect = el.getBoundingClientRect();
     const tx = rect.left + rect.width / 2, ty = rect.top + rect.height / 2;
+
     document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove());
     const s = document.createElement("style"); s.className = "__bmcp-cursor-style"; s.textContent = css; document.head.appendChild(s);
+
+    // Glide from last known position
+    const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 100, 0) };
+    window.__bmcp_cursorPos = { x: tx, y: ty };
+
     const c = document.createElement("div"); c.className = "__bmcp-cursor"; c.innerHTML = svg;
-    c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px"; document.body.appendChild(c);
-    const r = document.createElement("div"); r.className = "__bmcp-ripple";
-    r.style.left = tx + "px"; r.style.top = ty + "px"; document.body.appendChild(r);
-    // Wait for browser to paint, THEN click
+    c.style.left = (prev.x - 5) + "px"; c.style.top = (prev.y - 2) + "px";
+    c.style.opacity = "0";
+    document.body.appendChild(c);
+
     return new Promise(resolve => {
       requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          el.click();
-          resolve(true);
-        });
+        // Fade in + glide to target
+        c.style.opacity = "1";
+        c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px";
+
+        // After glide lands (~300ms): press squish → click → release
+        setTimeout(() => {
+          c.classList.add("--press");
+
+          // Dual-ring ripple at click point
+          const r1 = document.createElement("div"); r1.className = "__bmcp-ripple --fill";
+          r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
+          const r2 = document.createElement("div"); r2.className = "__bmcp-ripple --ring";
+          r2.style.left = tx + "px"; r2.style.top = ty + "px"; document.body.appendChild(r2);
+
+          setTimeout(() => {
+            c.classList.remove("--press");
+            el.click();
+            resolve(true);
+          }, 110);
+
+          setTimeout(() => { c.style.opacity = "0"; }, 380);
+          setTimeout(() => { document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style").forEach(e => e.remove()); }, 750);
+        }, 300);
       });
     });
   }, [selector, CURSOR_CSS, CURSOR_SVG]);
@@ -532,17 +584,36 @@ handlers.right_click = async ({ selector, tabId }) => {
     const el = document.querySelector(sel); if (!el) throw new Error(`Element not found: ${sel}`);
     const rect = el.getBoundingClientRect();
     const tx = rect.left + rect.width / 2, ty = rect.top + rect.height / 2;
+
     document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove());
     const s = document.createElement("style"); s.className = "__bmcp-cursor-style"; s.textContent = css; document.head.appendChild(s);
+
+    const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 100, 0) };
+    window.__bmcp_cursorPos = { x: tx, y: ty };
+
     const c = document.createElement("div"); c.className = "__bmcp-cursor"; c.innerHTML = svg;
-    c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px"; document.body.appendChild(c);
-    const r = document.createElement("div"); r.className = "__bmcp-ripple";
-    r.style.left = tx + "px"; r.style.top = ty + "px"; document.body.appendChild(r);
+    c.style.left = (prev.x - 5) + "px"; c.style.top = (prev.y - 2) + "px";
+    c.style.opacity = "0"; document.body.appendChild(c);
+
     return new Promise(resolve => {
-      requestAnimationFrame(() => { requestAnimationFrame(() => {
-        el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
-        resolve(true);
-      }); });
+      requestAnimationFrame(() => {
+        c.style.opacity = "1";
+        c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px";
+        setTimeout(() => {
+          c.classList.add("--press");
+          const r1 = document.createElement("div"); r1.className = "__bmcp-ripple --fill";
+          r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
+          const r2 = document.createElement("div"); r2.className = "__bmcp-ripple --ring";
+          r2.style.left = tx + "px"; r2.style.top = ty + "px"; document.body.appendChild(r2);
+          setTimeout(() => {
+            c.classList.remove("--press");
+            el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+            resolve(true);
+          }, 110);
+          setTimeout(() => { c.style.opacity = "0"; }, 380);
+          setTimeout(() => { document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style").forEach(e => e.remove()); }, 750);
+        }, 300);
+      });
     });
   }, [selector, CURSOR_CSS, CURSOR_SVG]);
 };
@@ -552,17 +623,42 @@ handlers.double_click = async ({ selector, tabId }) => {
     const el = document.querySelector(sel); if (!el) throw new Error(`Element not found: ${sel}`);
     const rect = el.getBoundingClientRect();
     const tx = rect.left + rect.width / 2, ty = rect.top + rect.height / 2;
+
     document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove());
     const s = document.createElement("style"); s.className = "__bmcp-cursor-style"; s.textContent = css; document.head.appendChild(s);
+
+    const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 100, 0) };
+    window.__bmcp_cursorPos = { x: tx, y: ty };
+
     const c = document.createElement("div"); c.className = "__bmcp-cursor"; c.innerHTML = svg;
-    c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px"; document.body.appendChild(c);
-    const r = document.createElement("div"); r.className = "__bmcp-ripple";
-    r.style.left = tx + "px"; r.style.top = ty + "px"; document.body.appendChild(r);
+    c.style.left = (prev.x - 5) + "px"; c.style.top = (prev.y - 2) + "px";
+    c.style.opacity = "0"; document.body.appendChild(c);
+
     return new Promise(resolve => {
-      requestAnimationFrame(() => { requestAnimationFrame(() => {
-        el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-        resolve(true);
-      }); });
+      requestAnimationFrame(() => {
+        c.style.opacity = "1";
+        c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px";
+        setTimeout(() => {
+          // First press
+          c.classList.add("--press");
+          const r1 = document.createElement("div"); r1.className = "__bmcp-ripple --fill";
+          r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
+          setTimeout(() => { c.classList.remove("--press"); }, 90);
+          // Second press
+          setTimeout(() => {
+            c.classList.add("--press");
+            const r2 = document.createElement("div"); r2.className = "__bmcp-ripple --fill";
+            r2.style.left = tx + "px"; r2.style.top = ty + "px"; document.body.appendChild(r2);
+            setTimeout(() => {
+              c.classList.remove("--press");
+              el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+              resolve(true);
+            }, 90);
+            setTimeout(() => { c.style.opacity = "0"; }, 350);
+            setTimeout(() => { document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style").forEach(e => e.remove()); }, 750);
+          }, 160);
+        }, 300);
+      });
     });
   }, [selector, CURSOR_CSS, CURSOR_SVG]);
 };
@@ -867,21 +963,38 @@ handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId 
       return isExact ? t === txt : t?.includes(txt);
     });
     if (!el) throw new Error(`No element with text "${txt}" found (type: ${elType})`);
-    // Show cursor + ripple
+
     const rect = el.getBoundingClientRect();
     const tx = rect.left + rect.width / 2, ty = rect.top + rect.height / 2;
     document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove());
     const s = document.createElement("style"); s.className = "__bmcp-cursor-style"; s.textContent = css; document.head.appendChild(s);
+
+    const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 100, 0) };
+    window.__bmcp_cursorPos = { x: tx, y: ty };
+
     const c = document.createElement("div"); c.className = "__bmcp-cursor"; c.innerHTML = svg;
-    c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px"; document.body.appendChild(c);
-    const r = document.createElement("div"); r.className = "__bmcp-ripple";
-    r.style.left = tx + "px"; r.style.top = ty + "px"; document.body.appendChild(r);
-    // Wait for paint, then click
+    c.style.left = (prev.x - 5) + "px"; c.style.top = (prev.y - 2) + "px";
+    c.style.opacity = "0"; document.body.appendChild(c);
+
     return new Promise(resolve => {
-      requestAnimationFrame(() => { requestAnimationFrame(() => {
-        el.click();
-        resolve({ clicked: true, tagName: el.tagName, text: el.textContent?.trim().slice(0, 200) });
-      }); });
+      requestAnimationFrame(() => {
+        c.style.opacity = "1";
+        c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px";
+        setTimeout(() => {
+          c.classList.add("--press");
+          const r1 = document.createElement("div"); r1.className = "__bmcp-ripple --fill";
+          r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
+          const r2 = document.createElement("div"); r2.className = "__bmcp-ripple --ring";
+          r2.style.left = tx + "px"; r2.style.top = ty + "px"; document.body.appendChild(r2);
+          setTimeout(() => {
+            c.classList.remove("--press");
+            el.click();
+            resolve({ clicked: true, tagName: el.tagName, text: el.textContent?.trim().slice(0, 200) });
+          }, 110);
+          setTimeout(() => { c.style.opacity = "0"; }, 380);
+          setTimeout(() => { document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style").forEach(e => e.remove()); }, 750);
+        }, 300);
+      });
     });
   }, [text, elementType, exact, CURSOR_CSS, CURSOR_SVG]);
 };
@@ -977,20 +1090,36 @@ handlers.find_by_xpath = async ({ xpath, action = "click", text, tabId }) => {
     const el = result.singleNodeValue;
     if (!el) throw new Error(`XPath not found: ${xp}`);
     if (act === "click") {
-      // Show cursor + ripple then click after paint
       const rect = el.getBoundingClientRect();
       const tx = rect.left + rect.width / 2, ty = rect.top + rect.height / 2;
       document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove());
       const s = document.createElement("style"); s.className = "__bmcp-cursor-style"; s.textContent = css; document.head.appendChild(s);
+
+      const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 100, 0) };
+      window.__bmcp_cursorPos = { x: tx, y: ty };
+
       const c = document.createElement("div"); c.className = "__bmcp-cursor"; c.innerHTML = svg;
-      c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px"; document.body.appendChild(c);
-      const r = document.createElement("div"); r.className = "__bmcp-ripple";
-      r.style.left = tx + "px"; r.style.top = ty + "px"; document.body.appendChild(r);
+      c.style.left = (prev.x - 5) + "px"; c.style.top = (prev.y - 2) + "px";
+      c.style.opacity = "0"; document.body.appendChild(c);
       return new Promise(resolve => {
-        requestAnimationFrame(() => { requestAnimationFrame(() => {
-          el.click();
-          resolve({ action: "clicked", tagName: el.tagName, text: el.textContent?.trim().slice(0, 200) });
-        }); });
+        requestAnimationFrame(() => {
+          c.style.opacity = "1";
+          c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px";
+          setTimeout(() => {
+            c.classList.add("--press");
+            const r1 = document.createElement("div"); r1.className = "__bmcp-ripple --fill";
+            r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
+            const r2 = document.createElement("div"); r2.className = "__bmcp-ripple --ring";
+            r2.style.left = tx + "px"; r2.style.top = ty + "px"; document.body.appendChild(r2);
+            setTimeout(() => {
+              c.classList.remove("--press");
+              el.click();
+              resolve({ action: "clicked", tagName: el.tagName, text: el.textContent?.trim().slice(0, 200) });
+            }, 110);
+            setTimeout(() => { c.style.opacity = "0"; }, 380);
+            setTimeout(() => { document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style").forEach(e => e.remove()); }, 750);
+          }, 300);
+        });
       });
     }
     if (act === "type" && txt) {
@@ -1007,6 +1136,106 @@ handlers.find_by_xpath = async ({ xpath, action = "click", text, tabId }) => {
     }
     return { tagName: el.tagName, text: el.textContent?.trim().slice(0, 200) };
   }, [xpath, action, text || null, CURSOR_CSS, CURSOR_SVG]);
+};
+
+// --- FILL FORM (multiple fields at once) ---
+
+handlers.fill_form = async ({ fields, tabId }) => {
+  return await injectAndRun(tabId, (fieldsData) => {
+    function resolveElement(fieldDef) {
+      // Strategy 1: CSS selector
+      if (fieldDef.selector) {
+        const el = document.querySelector(fieldDef.selector);
+        if (el) return el;
+      }
+      // Strategy 2: label text → for attr or nested input
+      if (fieldDef.label) {
+        const lbl = fieldDef.label;
+        const labels = Array.from(document.querySelectorAll("label"));
+        const matchLabel = labels.find(l => l.textContent?.trim().toLowerCase().includes(lbl.toLowerCase()));
+        if (matchLabel) {
+          const forId = matchLabel.getAttribute("for");
+          if (forId) { const el = document.getElementById(forId); if (el) return el; }
+          const nested = matchLabel.querySelector("input, textarea, select");
+          if (nested) return nested;
+        }
+        // Strategy 3: placeholder / aria-label match
+        const byAttr = document.querySelector(
+          `input[placeholder*="${lbl}" i], textarea[placeholder*="${lbl}" i], input[aria-label*="${lbl}" i], textarea[aria-label*="${lbl}" i]`
+        );
+        if (byAttr) return byAttr;
+        // Strategy 4: name attribute match
+        const byName = document.querySelector(`input[name*="${lbl}" i], textarea[name*="${lbl}" i]`);
+        if (byName) return byName;
+      }
+      return null;
+    }
+
+    function fillElement(el, value) {
+      if (el.tagName === "SELECT") {
+        const options = Array.from(el.options);
+        const match = options.find(o =>
+          o.text.toLowerCase().includes(value.toLowerCase()) ||
+          o.value.toLowerCase() === value.toLowerCase()
+        );
+        if (match) el.value = match.value;
+        else el.value = value;
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return { filled: true, type: "select", selectedText: el.options[el.selectedIndex]?.text };
+      }
+      if (el.type === "checkbox" || el.type === "radio") {
+        const check = value === "true" || value === "1" || value === "on" || value === "checked";
+        el.checked = check;
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return { filled: true, type: el.type, checked: el.checked };
+      }
+      el.focus();
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement : HTMLInputElement;
+      const nativeSetter = Object.getOwnPropertyDescriptor(proto.prototype, "value")?.set;
+      if (nativeSetter) { nativeSetter.call(el, value); } else { el.value = value; }
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return { filled: true, type: el.type || el.tagName.toLowerCase() };
+    }
+
+    const results = [];
+    for (const field of fieldsData) {
+      const el = resolveElement(field);
+      if (!el) {
+        results.push({ field: field.selector || field.label, error: "Element not found" });
+        continue;
+      }
+      const info = fillElement(el, String(field.value));
+      results.push({ field: field.selector || field.label, ...info });
+    }
+    return results;
+  }, [fields]);
+};
+
+// --- BATCH (run multiple actions sequentially) ---
+
+handlers.batch = async ({ actions, tabId: defaultTabId }) => {
+  const results = [];
+  for (const action of actions) {
+    const { command, params = {} } = action;
+    const handler = handlers[command];
+    if (!handler) {
+      results.push({ command, error: `Unknown command: ${command}` });
+      continue;
+    }
+    try {
+      const mergedParams = { tabId: defaultTabId, ...params };
+      const result = await Promise.race([
+        handler(mergedParams),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`Batch step '${command}' timed out`)), 30_000)),
+      ]);
+      results.push({ command, result });
+    } catch (e) {
+      results.push({ command, error: e.message || String(e) });
+      if (action.abortOnError) break;
+    }
+  }
+  return results;
 };
 
 // ============================================================
