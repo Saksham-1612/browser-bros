@@ -1,73 +1,214 @@
 <!DOCTYPE html>
 <html>
+
 <head>
   <meta charset="utf-8">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      width: 280px;
-      padding: 16px;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-size: 13px;
-      color: #1a1a1a;
-      background: #fff;
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
     }
-    .header {
+
+    body {
+      width: 320px;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      color: #1F2937;
+      background: #F8F9FB;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      text-align: center;
+      padding: 32px 24px 22px;
+      margin: 14px 14px 0;
+      background: #ffffff;
+      border-radius: 24px;
+      box-shadow:
+        0 10px 25px rgba(0, 0, 0, 0.05),
+        0 2px 6px rgba(0, 0, 0, 0.03);
+    }
+
+    .hero-title {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      background: linear-gradient(135deg, #EC4899, #8B5CF6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 16px;
+    }
+
+    .logo-glow {
+      display: inline-block;
+      padding: 16px;
+      border-radius: 28px;
+      background: radial-gradient(circle, rgba(236, 72, 153, 0.12), rgba(139, 92, 246, 0.06), transparent 70%);
+    }
+
+    .hero-gif {
+      width: 96px;
+      height: 96px;
+      border-radius: 24px;
+      object-fit: cover;
+      box-shadow:
+        0 8px 24px rgba(236, 72, 153, 0.18),
+        0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+
+    /* ── Status Card ── */
+    .status-card {
+      margin: 12px 14px 0;
+      padding: 14px 18px;
+      background: #ffffff;
+      border-radius: 20px;
+      box-shadow:
+        0 4px 12px rgba(0, 0, 0, 0.04),
+        0 1px 3px rgba(0, 0, 0, 0.03);
       display: flex;
       align-items: center;
       gap: 10px;
-      margin-bottom: 16px;
     }
-    .header h1 {
-      font-size: 16px;
-      font-weight: 600;
-    }
-    .status {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 12px;
-      border-radius: 8px;
-      background: #f5f5f5;
-    }
+
     .status-dot {
       width: 10px;
       height: 10px;
       border-radius: 50%;
       flex-shrink: 0;
+      transition: all 0.3s ease;
     }
-    .status-dot.connected { background: #22c55e; }
-    .status-dot.disconnected { background: #ef4444; }
+
+    .status-dot.connected {
+      background: #22C55E;
+      box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);
+      animation: pulse 2s infinite;
+    }
+
+    .status-dot.disconnected {
+      background: #D1D5DB;
+    }
+
+    @keyframes pulse {
+      0% {
+        box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5);
+      }
+
+      70% {
+        box-shadow: 0 0 0 8px rgba(34, 197, 94, 0);
+      }
+
+      100% {
+        box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+      }
+    }
+
     .status-text {
+      font-weight: 600;
+      font-size: 13px;
+      color: #6B7280;
+      transition: color 0.2s ease;
+    }
+
+    .status-text.active {
+      color: #1F2937;
+    }
+
+    .server-tag {
+      margin-left: auto;
+      font-size: 11px;
       font-weight: 500;
+      color: #9CA3AF;
+      background: #F3F4F6;
+      padding: 3px 10px;
+      border-radius: 10px;
+      letter-spacing: 0.01em;
     }
-    .info {
-      margin-top: 12px;
-      color: #666;
-      font-size: 11px;
-      line-height: 1.5;
+
+    /* ── Actions ── */
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin: 12px 14px 16px;
     }
-    .info code {
-      background: #f0f0f0;
-      padding: 1px 4px;
-      border-radius: 3px;
-      font-size: 11px;
+
+    .btn {
+      flex: 1;
+      padding: 12px 0;
+      border: none;
+      border-radius: 16px;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      letter-spacing: -0.01em;
+    }
+
+    .btn-connect {
+      background: linear-gradient(135deg, #EC4899, #F472B6);
+      color: #fff;
+      box-shadow: 0 6px 14px rgba(236, 72, 153, 0.25);
+    }
+
+    .btn-connect:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 22px rgba(236, 72, 153, 0.35);
+    }
+
+    .btn-connect:active:not(:disabled) {
+      transform: translateY(0);
+      box-shadow: 0 4px 10px rgba(236, 72, 153, 0.2);
+    }
+
+    .btn-disconnect {
+      background: #F3F4F6;
+      color: #4B5563;
+    }
+
+    .btn-disconnect:hover:not(:disabled) {
+      background: #E5E7EB;
+      transform: translateY(-1px);
+    }
+
+    .btn-disconnect:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    .btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      transform: none !important;
+      box-shadow: none !important;
     }
   </style>
 </head>
+
 <body>
-  <div class="header">
-    <h1>BrowserMCP</h1>
+  <div class="hero">
+    <div class="hero-title">Browser Bros</div>
+    <div class="logo-glow">
+      <img class="hero-gif" src="https://kapture-p.s3.amazonaws.com/team_message_app/030625/BOT_WAVE.gif"
+        alt="Browser Bros">
+    </div>
   </div>
-  <div class="status">
+
+  <div class="status-card">
     <div class="status-dot disconnected" id="statusDot"></div>
     <span class="status-text" id="statusText">Disconnected</span>
+    <span class="server-tag">localhost:12800</span>
   </div>
-  <div class="info">
-    <p>MCP server: <code>ws://localhost:12800</code></p>
-    <p style="margin-top: 6px;">Start the server to connect:</p>
-    <p><code>node server/dist/index.js</code></p>
+
+  <div class="actions">
+    <button class="btn btn-connect" id="connectBtn">Connect</button>
+    <button class="btn btn-disconnect" id="disconnectBtn" disabled>Disconnect</button>
   </div>
+
   <script src="popup.js"></script>
 </body>
+
 </html>

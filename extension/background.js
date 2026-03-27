@@ -9,6 +9,7 @@ const FAST_POLL_INTERVAL_MS = 1500; // fast reconnect polling when disconnected
 
 let ws = null;
 let connected = false;
+let connecting = false; // guard against concurrent connect() calls
 let reconnectDelay = RECONNECT_BASE_MS;
 let keepaliveTimer = null;
 let fastPollTimer = null;
@@ -20,24 +21,35 @@ let fastPollTimer = null;
 const HEALTH_URL = WS_URL.replace("ws://", "http://") + "/health";
 
 async function connect() {
+  if (connecting) return; // another connect() is already in flight
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+
+  connecting = true;
 
   // Probe /health endpoint first — avoids ERR_CONNECTION_REFUSED spam from WebSocket
   try {
     const resp = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(2000) });
-    if (!resp.ok) return;
+    if (!resp.ok) { connecting = false; return; }
   } catch {
     // Server not running — skip WebSocket entirely, no error logged
+    connecting = false;
+    return;
+  }
+
+  // Double-check after async gap — another call may have connected while we awaited
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+    connecting = false;
     return;
   }
 
   // Server is alive — safe to connect WebSocket
-  try { ws = new WebSocket(WS_URL); } catch (e) { return; }
+  try { ws = new WebSocket(WS_URL); } catch (e) { connecting = false; return; }
 
   ws.onerror = () => {};
 
   ws.onopen = () => {
     connected = true;
+    connecting = false;
     reconnectDelay = RECONNECT_BASE_MS;
     console.log("[BrowserMCP] Connected");
     updateBadge(true);
@@ -61,7 +73,7 @@ async function connect() {
   };
 
   ws.onclose = () => {
-    connected = false; ws = null;
+    connected = false; connecting = false; ws = null;
     updateBadge(false); stopKeepalive();
     reconnectDelay = RECONNECT_BASE_MS;
     startFastPoll();
@@ -116,6 +128,16 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "getStatus") { sendResponse({ connected }); return true; }
   if (msg.type === "reconnect") { reconnectDelay = RECONNECT_BASE_MS; connect(); sendResponse({ ok: true }); return true; }
+  if (msg.type === "disconnect") {
+    stopFastPoll();
+    stopKeepalive();
+    chrome.alarms.clear("browserMcpReconnect");
+    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    connected = false; connecting = false;
+    updateBadge(false);
+    sendResponse({ ok: true });
+    return true;
+  }
 });
 
 // ============================================================
