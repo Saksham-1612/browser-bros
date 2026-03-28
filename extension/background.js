@@ -306,8 +306,8 @@ handlers.list_tabs = async () => {
 
 handlers.close_tab = async ({ tabId }) => { await chrome.tabs.remove(tabId); return { success: true }; };
 
-handlers.click = async ({ selector, tabId }) => {
-  return await injectAndRun(tabId, (sel, css, svg) => {
+handlers.click = async ({ selector, tabId, waitForSelector, waitForSelectorTimeout = 5000 }) => {
+  const result = await injectAndRun(tabId, (sel, css, svg) => {
     const el = document.querySelector(sel); if (!el) throw new Error(`Element not found: ${sel}`);
     const rect = el.getBoundingClientRect();
     const tx = rect.left + rect.width / 2, ty = rect.top + rect.height / 2;
@@ -357,6 +357,10 @@ handlers.click = async ({ selector, tabId }) => {
       });
     });
   }, [selector, CURSOR_CSS, CURSOR_SVG]);
+  if (waitForSelector) {
+    await handlers.wait_for({ selector: waitForSelector, timeout: waitForSelectorTimeout, tabId });
+  }
+  return result;
 };
 
 handlers.type = async ({ selector, text, tabId }) => {
@@ -375,7 +379,7 @@ handlers.type = async ({ selector, text, tabId }) => {
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
     return true;
-  }, [selector, text]);
+  }, [selector, text], "MAIN");
 };
 
 handlers.screenshot = async ({ tabId }) => {
@@ -384,7 +388,7 @@ handlers.screenshot = async ({ tabId }) => {
 };
 
 handlers.execute_js = async ({ code, tabId }) => {
-  return await injectAndRun(tabId, (jsCode) => (0, eval)(jsCode), [code], "MAIN");
+  return await injectAndRun(tabId, (jsCode) => (0, eval)(`(function(){\n${jsCode}\n})()`), [code], "MAIN");
 };
 
 // --- NAVIGATION ---
@@ -1246,7 +1250,164 @@ handlers.fill_form = async ({ fields, tabId }) => {
       results.push({ field: field.selector || field.label, strategy: resolved.strategy, ...info });
     }
     return results;
-  }, [fields]);
+  }, [fields], "MAIN");
+};
+
+// --- INSPECT PAGE (full interactive element map) ---
+
+handlers.inspect_page = async ({ tabId, scope }) => {
+  return await injectAndRun(tabId, (scopeSel) => {
+    // Build a unique, verified CSS selector for an element
+    function uniqueSelector(el) {
+      if (el.id) {
+        const sel = `#${CSS.escape(el.id)}`;
+        if (document.querySelectorAll(sel).length === 1) return sel;
+      }
+      for (const attr of ["data-testid", "data-test-id", "data-cy", "data-qa"]) {
+        const val = el.getAttribute(attr);
+        if (val) {
+          const sel = `[${attr}="${CSS.escape(val)}"]`;
+          if (document.querySelectorAll(sel).length === 1) return sel;
+        }
+      }
+      const ariaLabel = el.getAttribute("aria-label");
+      if (ariaLabel) {
+        const tag = el.tagName.toLowerCase();
+        const sel = `${tag}[aria-label="${ariaLabel.replace(/"/g, '\\"')}"]`;
+        if (document.querySelectorAll(sel).length === 1) return sel;
+      }
+      const name = el.getAttribute("name");
+      if (name) {
+        const tag = el.tagName.toLowerCase();
+        const sel = `${tag}[name="${CSS.escape(name)}"]`;
+        if (document.querySelectorAll(sel).length === 1) return sel;
+      }
+      // Walk up building a path
+      const parts = [];
+      let node = el;
+      while (node && node !== document.body) {
+        const tag = node.tagName.toLowerCase();
+        const parent = node.parentElement;
+        if (!parent) break;
+        const siblings = Array.from(parent.children).filter(c => c.tagName === node.tagName);
+        const nth = siblings.indexOf(node) + 1;
+        parts.unshift(siblings.length > 1 ? `${tag}:nth-of-type(${nth})` : tag);
+        node = parent;
+        const candidate = parts.join(" > ");
+        if (document.querySelectorAll(candidate).length === 1) return candidate;
+      }
+      return parts.join(" > ") || el.tagName.toLowerCase();
+    }
+
+    // Resolve visible label for an element
+    function resolveLabel(el) {
+      if (el.id) {
+        const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (lbl) return lbl.textContent?.trim() || "";
+      }
+      const wrapping = el.closest("label");
+      if (wrapping) {
+        const clone = wrapping.cloneNode(true);
+        clone.querySelectorAll("input,textarea,select").forEach(c => c.remove());
+        const t = clone.textContent?.trim();
+        if (t) return t;
+      }
+      return el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title") || "";
+    }
+
+    // Is element in viewport?
+    function inViewport(rect) {
+      return rect.width > 0 && rect.height > 0 &&
+        rect.top < window.innerHeight && rect.bottom > 0 &&
+        rect.left < window.innerWidth && rect.right > 0;
+    }
+
+    const root = scopeSel ? document.querySelector(scopeSel) : document.body;
+    if (!root) return { error: `Scope element not found: ${scopeSel}` };
+
+    // Page context: headings
+    const headings = Array.from(document.querySelectorAll("h1, h2, h3"))
+      .filter(h => h.offsetParent !== null)
+      .map(h => ({ level: parseInt(h.tagName[1]), text: h.textContent?.trim().slice(0, 120) || "" }))
+      .slice(0, 10);
+
+    // Collect all interactive elements
+    const INTERACTIVE = 'a[href], button, input:not([type="hidden"]), textarea, select, [role="button"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="menuitem"], [role="option"], [contenteditable="true"]';
+    const all = Array.from(root.querySelectorAll(INTERACTIVE));
+
+    // Group by nearest form ancestor (null = top-level)
+    const formMap = new Map(); // form el → array of element infos
+    const topLevel = [];
+
+    for (const el of all) {
+      const rect = el.getBoundingClientRect();
+      // Skip truly invisible (not just off-screen)
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+
+      const tag = el.tagName.toLowerCase();
+      const type = el.getAttribute("type") || "";
+      const role = el.getAttribute("role") || tag;
+
+      // Determine action hint
+      let actionHint = "click";
+      if (tag === "input" && !["button", "submit", "reset", "checkbox", "radio", "file"].includes(type)) actionHint = "type/fill";
+      if (tag === "textarea") actionHint = "type/fill";
+      if (tag === "select") actionHint = "fill_form (select)";
+      if (type === "checkbox" || type === "radio" || role === "checkbox" || role === "radio" || role === "switch") actionHint = "click (toggle)";
+
+      // Select options
+      let options = undefined;
+      if (tag === "select") {
+        options = Array.from(el.options).map(o => ({ value: o.value, text: o.text, selected: o.selected }));
+      }
+
+      const info = {
+        tag,
+        type: type || undefined,
+        role: (role !== tag) ? role : undefined,
+        label: resolveLabel(el),
+        text: (tag === "button" || tag === "a" || (el.getAttribute("role") || "").includes("button"))
+          ? el.textContent?.trim().slice(0, 120) || ""
+          : undefined,
+        selector: uniqueSelector(el),
+        value: (el.value !== undefined && el.value !== "") ? el.value.slice(0, 200) : undefined,
+        checked: el.type === "checkbox" || el.type === "radio" ? el.checked : undefined,
+        state: {
+          disabled: el.disabled || el.getAttribute("aria-disabled") === "true" || undefined,
+          required: el.required || el.getAttribute("aria-required") === "true" || undefined,
+          readonly: el.readOnly || undefined,
+          inViewport: inViewport(rect),
+        },
+        rect: { top: Math.round(rect.top), left: Math.round(rect.left), w: Math.round(rect.width), h: Math.round(rect.height) },
+        options,
+        actionHint,
+        href: (tag === "a" && el.href) ? el.href.slice(0, 200) : undefined,
+      };
+      // Remove undefined keys
+      Object.keys(info).forEach(k => info[k] === undefined && delete info[k]);
+      Object.keys(info.state).forEach(k => info.state[k] === undefined && delete info.state[k]);
+
+      const form = el.closest("form");
+      if (form) {
+        if (!formMap.has(form)) formMap.set(form, { name: form.getAttribute("name") || form.id || null, action: form.getAttribute("action") || null, elements: [] });
+        formMap.get(form).elements.push(info);
+      } else {
+        topLevel.push(info);
+      }
+    }
+
+    const forms = Array.from(formMap.values());
+
+    return {
+      url: location.href,
+      title: document.title,
+      headings,
+      forms,
+      topLevelElements: topLevel,
+      totalInteractive: all.length,
+    };
+  }, [scope || null]);
 };
 
 // --- BATCH (run multiple actions sequentially) ---

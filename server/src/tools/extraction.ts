@@ -5,6 +5,19 @@ import { jsonResult } from "./helpers.js";
 
 export function registerExtractionTools(server: McpServer, bridge: WebSocketBridge) {
   server.tool(
+    "browser_inspect_page",
+    "Return a full structural map of every interactive element on the page: inputs, buttons, links, selects — grouped by form, with their current values, disabled/checked/required states, verified unique CSS selectors, visible labels, and bounding rects. Use this before acting on an unfamiliar page or when previous clicks/fills missed the right target. Much more complete than browser_get_interactive_elements.",
+    {
+      scope: z.string().optional().describe("Optional CSS selector to limit inspection to a subtree (e.g. '#checkout-form'). Defaults to full page."),
+      tabId: z.number().optional().describe("Tab ID. If omitted, uses active tab."),
+    },
+    async ({ scope, tabId }) => {
+      const result = await bridge.sendCommand("inspect_page", { scope, tabId });
+      return jsonResult(result);
+    }
+  );
+
+  server.tool(
     "browser_get_links",
     "Extract all links from the page, optionally filtered.",
     {

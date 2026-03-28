@@ -70,9 +70,11 @@ export function registerCoreTools(server: McpServer, bridge: WebSocketBridge) {
       selector: z.string().describe("CSS selector of the element to click"),
       waitMs: z.number().optional().default(0).describe("Extra ms to wait after click for SPA route transitions or animations"),
       tabId: z.number().optional().describe("Tab ID. If omitted, uses active tab."),
+      waitForSelector: z.string().optional().describe("CSS selector to wait for after click (useful for SPA step transitions)"),
+      waitForSelectorTimeout: z.number().optional().default(5000).describe("Timeout in ms for waitForSelector (default 5000)"),
     },
-    async ({ selector, waitMs, tabId }) => {
-      const result = (await bridge.sendCommand("click", { selector, tabId })) as {
+    async ({ selector, waitMs, tabId, waitForSelector, waitForSelectorTimeout }) => {
+      const result = (await bridge.sendCommand("click", { selector, tabId, waitForSelector, waitForSelectorTimeout })) as {
         clicked: boolean; tagName: string; text: string; wasVisible: boolean;
       } | boolean;
       if (waitMs && waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
