@@ -45,7 +45,7 @@ async function connect() {
   // Server is alive — safe to connect WebSocket
   try { ws = new WebSocket(WS_URL); } catch (e) { connecting = false; return; }
 
-  ws.onerror = () => {};
+  ws.onerror = () => { };
 
   ws.onopen = () => {
     connected = true;
@@ -207,23 +207,75 @@ async function injectAndRun(tabId, func, args = [], world = "ISOLATED") {
 // Animated Cursor Helper
 // ============================================================
 
-// Cursor CSS + SVG injected into page (shared by all cursor helpers)
+// ─── Visual design tokens ─────────────────────────────────────────────────────
 const CURSOR_CSS = `
-.__bmcp-cursor{
-  position:fixed;z-index:2147483647;pointer-events:none;
-  width:28px;height:28px;
-  filter:drop-shadow(0 3px 10px rgba(0,0,0,.4));
-  transition:left .42s cubic-bezier(.34,1.56,.64,1),top .42s cubic-bezier(.34,1.56,.64,1),opacity .22s ease,transform .12s ease;
-  transform-origin:4px 2px;
-}
-.__bmcp-cursor.--press{transform:scale(.72) rotate(-6deg)}
-.__bmcp-ripple{position:fixed;z-index:2147483646;pointer-events:none;border-radius:50%;transform:translate(-50%,-50%)}
-.__bmcp-ripple.--fill{width:0;height:0;background:radial-gradient(circle,rgba(59,130,246,.48) 0%,rgba(59,130,246,0) 70%);animation:__bmcp-rf .52s ease-out forwards}
-.__bmcp-ripple.--ring{width:0;height:0;border:2px solid rgba(59,130,246,.5);animation:__bmcp-rr .6s ease-out .05s forwards}
-@keyframes __bmcp-rf{0%{width:0;height:0;opacity:1}100%{width:72px;height:72px;opacity:0}}
-@keyframes __bmcp-rr{0%{width:0;height:0;opacity:.75}100%{width:58px;height:58px;opacity:0}}
+  /* ── Cursor arrow ── */
+  .__bmcp-cursor{
+    position:fixed;z-index:2147483647;pointer-events:none;
+    width:26px;height:26px;
+    filter:drop-shadow(0 2px 6px rgba(0,0,0,.55)) drop-shadow(0 0 14px rgba(255,255,255,.2));
+    transition:left .28s cubic-bezier(.22,1,.36,1),top .28s cubic-bezier(.22,1,.36,1),opacity .16s ease,transform .1s ease;
+    transform-origin:4px 2px;will-change:left,top;
+  }
+  .__bmcp-cursor.--press{transform:scale(.66) rotate(-10deg)}
+
+  /* ── Action badge – glass pill next to cursor ── */
+  .__bmcp-badge{
+    position:fixed;z-index:2147483647;pointer-events:none;
+    display:flex;align-items:center;gap:5px;
+    background:rgba(12,12,12,.82);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+    border:1px solid rgba(255,255,255,.13);border-radius:20px;
+    padding:4px 11px 4px 9px;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+    font-size:11.5px;font-weight:600;color:rgba(255,255,255,.9);letter-spacing:.1px;white-space:nowrap;
+    box-shadow:0 6px 24px rgba(0,0,0,.45),0 1px 4px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.07);
+    animation:__bmcp-badge-pop .18s cubic-bezier(.22,1,.36,1);
+    transition:left .28s cubic-bezier(.22,1,.36,1),top .28s cubic-bezier(.22,1,.36,1),background .2s ease,opacity .18s ease;
+  }
+  .__bmcp-badge.--done{background:rgba(5,150,105,.88)!important;border-color:rgba(52,211,153,.35)!important;}
+  @keyframes __bmcp-badge-pop{from{opacity:0;transform:scale(.75) translateX(-8px)}to{opacity:1;transform:scale(1) translateX(0)}}
+
+  /* ── Target reticle – draws around element before click ── */
+  .__bmcp-target{
+    position:fixed;z-index:2147483644;pointer-events:none;border-radius:5px;
+    animation:__bmcp-target-draw .24s cubic-bezier(.22,1,.36,1) forwards;
+  }
+  @keyframes __bmcp-target-draw{
+    0%  {outline:2px solid rgba(255,255,255,0);box-shadow:none;transform:scale(1.14)}
+    55% {outline:2px solid rgba(255,255,255,.85);box-shadow:0 0 18px 4px rgba(139,92,246,.4),inset 0 0 8px rgba(139,92,246,.15);transform:scale(1.03)}
+    100%{outline:2px solid rgba(255,255,255,.18);box-shadow:none;transform:scale(1)}
+  }
+
+  /* ── Ripple (white – visible on any background) ── */
+  .__bmcp-ripple{position:fixed;z-index:2147483646;pointer-events:none;border-radius:50%;transform:translate(-50%,-50%)}
+  .__bmcp-ripple.--fill{width:0;height:0;background:radial-gradient(circle,rgba(255,255,255,.35) 0%,rgba(255,255,255,0) 70%);animation:__bmcp-rf .42s ease-out forwards}
+  .__bmcp-ripple.--ring{width:0;height:0;border:1.5px solid rgba(255,255,255,.55);animation:__bmcp-rr .52s ease-out .03s forwards}
+  @keyframes __bmcp-rf{0%{width:0;height:0;opacity:1}100%{width:68px;height:68px;opacity:0}}
+  @keyframes __bmcp-rr{0%{width:0;height:0;opacity:.9}100%{width:56px;height:56px;opacity:0}}
+
+  /* ── Spotlight overlay ── */
+  .__bmcp-spotlight{
+    position:fixed;inset:0;z-index:2147483639;pointer-events:none;
+    background:rgba(0,0,0,.18);
+    animation:__bmcp-sp-in .18s ease-out,__bmcp-sp-out .28s ease-in .52s forwards;
+  }
+  @keyframes __bmcp-sp-in{from{opacity:0}to{opacity:1}}
+  @keyframes __bmcp-sp-out{from{opacity:1}to{opacity:0}}
+
+  /* ── Typing glow ring ── */
+  .__bmcp-type-ring{
+    position:fixed;z-index:2147483645;pointer-events:none;border-radius:7px;
+    box-shadow:0 0 0 2.5px rgba(99,102,241,.8),0 0 18px rgba(99,102,241,.45);
+    animation:__bmcp-tr-pulse 1.3s ease-in-out infinite;
+  }
+  @keyframes __bmcp-tr-pulse{
+    0%,100%{box-shadow:0 0 0 2.5px rgba(99,102,241,.8),0 0 18px rgba(99,102,241,.45)}
+    50%{box-shadow:0 0 0 3.5px rgba(99,102,241,.5),0 0 28px rgba(99,102,241,.22)}
+  }
 `;
-const CURSOR_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28"><path d="M5 2L5 24L11 18L18 26L22 23L15 15L23 15Z" fill="#fff" stroke="#222" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+// Glossy black arrow with white outline — high-contrast on any page
+const CURSOR_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="26" height="26"><path d="M4 2L4 20L9 15.5L15.5 23L19 20.5L12.5 13L20 13Z" fill="#111" stroke="#fff" stroke-width="1.35" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+
 
 // Inject cursor that glides to the target element from the previous cursor position
 async function injectCursor(tabId, selector, selectorType = "css") {
@@ -267,7 +319,7 @@ async function injectCursor(tabId, selector, selectorType = "css") {
 
     setTimeout(() => { c.style.opacity = "0"; }, 580);
     setTimeout(() => { document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove()); }, 820);
-  }, [selector, selectorType, CURSOR_CSS, CURSOR_SVG]).catch(() => {});
+  }, [selector, selectorType, CURSOR_CSS, CURSOR_SVG]).catch(() => { });
   // Wait enough for glide to visually land before the action fires
   await new Promise(r => setTimeout(r, 280));
 }
@@ -306,60 +358,143 @@ handlers.list_tabs = async () => {
 
 handlers.close_tab = async ({ tabId }) => { await chrome.tabs.remove(tabId); return { success: true }; };
 
+// Universal element finder — works on Tailwind/CSS-in-JS sites without stable selectors
+// Returns the best matching element using 8 progressive strategies
+function findSmartElement(query, context = document) {
+  const q = query.trim();
+  const ql = q.toLowerCase();
+
+  // 1. Exact CSS selector (id, data-testid, aria-label attr)
+  try {
+    const el = context.querySelector(q);
+    if (el) return el;
+  } catch { }
+
+  // 2. aria-label exact or partial
+  for (const tag of ["button", "a", "input", "textarea", "select", "[role]", "*"]) {
+    const els = context.querySelectorAll(tag);
+    const found = Array.from(els).find(e => {
+      const al = (e.getAttribute("aria-label") || "").toLowerCase();
+      return al === ql || al.includes(ql);
+    });
+    if (found) return found;
+    if (tag === "[role]") break;
+  }
+
+  // 3. data-testid / data-test-id / data-cy / data-qa
+  for (const attr of ["data-testid", "data-test-id", "data-cy", "data-qa", "data-id"]) {
+    const el = context.querySelector(`[${attr}*="${q}" i]`) || context.querySelector(`[${attr}="${q}"]`);
+    if (el) return el;
+  }
+
+  // 4. Visible text content — prefer innermost (shortest textContent)
+  const clickable = Array.from(context.querySelectorAll('button,[role="button"],[role="tab"],[role="menuitem"],[role="option"],a,summary'));
+  const textMatches = clickable.filter(e => {
+    const t = (e.textContent || "").trim().toLowerCase();
+    return t === ql || t.includes(ql);
+  });
+  if (textMatches.length) {
+    return textMatches.reduce((best, cur) =>
+      (cur.textContent || "").trim().length < (best.textContent || "").trim().length ? cur : best
+    );
+  }
+
+  // 5. title / placeholder / name fallback
+  const byAttr = context.querySelector(
+    `[title*="${q}" i],[placeholder*="${q}" i],[name*="${q}" i]`
+  );
+  if (byAttr) return byAttr;
+
+  return null;
+}
+
 handlers.click = async ({ selector, tabId, waitForSelector, waitForSelectorTimeout = 5000 }) => {
   const result = await injectAndRun(tabId, (sel, css, svg) => {
-    const el = document.querySelector(sel); if (!el) throw new Error(`Element not found: ${sel}`);
+    // ── Element resolution with smart fallback ────────────────────────────────
+    let el = null;
+    try { el = document.querySelector(sel); } catch { }
+    if (!el) {
+      const q = sel.replace(/^[#.\['"]/, "").replace(/[\]'"]/g, "").toLowerCase();
+      el = document.querySelector(`[aria-label*="${sel}" i]`);
+      if (!el) el = document.querySelector(`[data-testid*="${sel}" i],[data-cy*="${sel}" i]`);
+      if (!el) {
+        const clickable = Array.from(document.querySelectorAll('button,[role="button"],a,[role="tab"],[role="menuitem"]'));
+        const m = clickable.filter(e => (e.textContent || '').trim().toLowerCase().includes(q));
+        if (m.length) el = m.reduce((b, c) => (c.textContent || '').trim().length < (b.textContent || '').trim().length ? c : b);
+      }
+    }
+    if (!el) throw new Error(`Element not found: ${sel}`);
+
+    // ── Scroll into view ─────────────────────────────────────────────────────
+    const r0 = el.getBoundingClientRect();
+    if (r0.top < 0 || r0.bottom > window.innerHeight) el.scrollIntoView({ block: "center", behavior: "instant" });
     const rect = el.getBoundingClientRect();
     const tx = rect.left + rect.width / 2, ty = rect.top + rect.height / 2;
 
-    document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove());
+    // ── Build DOM layer ───────────────────────────────────────────────────────
+    document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style,.__bmcp-badge,.__bmcp-target,.__bmcp-spotlight").forEach(e => e.remove());
     const s = document.createElement("style"); s.className = "__bmcp-cursor-style"; s.textContent = css; document.head.appendChild(s);
 
-    // Glide from last known position
-    const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 100, 0) };
-    window.__bmcp_cursorPos = { x: tx, y: ty };
+    // Spotlight
+    const spot = document.createElement("div"); spot.className = "__bmcp-spotlight"; document.body.appendChild(spot);
 
+    // Cursor — starts from previous known position
+    const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 80, 0) };
+    window.__bmcp_cursorPos = { x: tx, y: ty };
     const c = document.createElement("div"); c.className = "__bmcp-cursor"; c.innerHTML = svg;
-    c.style.left = (prev.x - 5) + "px"; c.style.top = (prev.y - 2) + "px";
-    c.style.opacity = "0";
+    c.style.left = (prev.x - 4) + "px"; c.style.top = (prev.y - 2) + "px"; c.style.opacity = "0";
     document.body.appendChild(c);
+
+    // Action badge — floats to the right of cursor
+    const badge = document.createElement("div"); badge.className = "__bmcp-badge";
+    badge.innerHTML = '<span style="font-size:13px">⌥</span><span>Click</span>';
+    badge.style.left = (prev.x + 22) + "px"; badge.style.top = (prev.y - 13) + "px";
+    document.body.appendChild(badge);
 
     return new Promise(resolve => {
       requestAnimationFrame(() => {
-        // Fade in + glide to target
+        // Cursor glides to target
         c.style.opacity = "1";
-        c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px";
+        c.style.left = (tx - 4) + "px"; c.style.top = (ty - 2) + "px";
+        // Badge follows cursor
+        badge.style.left = (tx + 22) + "px"; badge.style.top = (ty - 13) + "px";
 
-        // After glide lands (~300ms): press squish → click → release
+        // ── After cursor lands (0.28s) ────────────────────────────────────────
         setTimeout(() => {
+          // Target reticle ring
+          const tring = document.createElement("div"); tring.className = "__bmcp-target";
+          tring.style.cssText = `left:${rect.left - 4}px;top:${rect.top - 4}px;width:${rect.width + 8}px;height:${rect.height + 8}px`;
+          document.body.appendChild(tring);
+
+          // Cursor squish
           c.classList.add("--press");
 
-          // Dual-ring ripple at click point
-          const r1 = document.createElement("div"); r1.className = "__bmcp-ripple --fill";
-          r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
-          const r2 = document.createElement("div"); r2.className = "__bmcp-ripple --ring";
-          r2.style.left = tx + "px"; r2.style.top = ty + "px"; document.body.appendChild(r2);
-
+          // ── Fire click after squish (90ms) ────────────────────────────────
           setTimeout(() => {
             c.classList.remove("--press");
-            el.click();
-            resolve({
-              clicked: true,
-              tagName: el.tagName,
-              text: el.textContent?.trim().slice(0, 200) || "",
-              wasVisible: rect.width > 0 || rect.height > 0,
-            });
-          }, 110);
 
-          setTimeout(() => { c.style.opacity = "0"; }, 380);
-          setTimeout(() => { document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style").forEach(e => e.remove()); }, 750);
-        }, 300);
+            // Ripple burst
+            const r1 = document.createElement("div"); r1.className = "__bmcp-ripple --fill";
+            r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
+            const rr = document.createElement("div"); rr.className = "__bmcp-ripple --ring";
+            rr.style.left = tx + "px"; rr.style.top = ty + "px"; document.body.appendChild(rr);
+
+            el.click();
+
+            // Badge → "✓ Done" flash
+            badge.classList.add("--done");
+            badge.innerHTML = '<span style="font-size:13px">✓</span><span>Done</span>';
+
+            resolve({ clicked: true, tagName: el.tagName, text: (el.textContent || '').trim().slice(0, 200), wasVisible: rect.width > 0 || rect.height > 0 });
+
+            setTimeout(() => { c.style.opacity = "0"; badge.style.opacity = "0"; }, 300);
+            setTimeout(() => { document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style,.__bmcp-badge,.__bmcp-target,.__bmcp-spotlight").forEach(e => e.remove()); }, 820);
+          }, 90);
+        }, 280);
       });
     });
   }, [selector, CURSOR_CSS, CURSOR_SVG]);
-  if (waitForSelector) {
-    await handlers.wait_for({ selector: waitForSelector, timeout: waitForSelectorTimeout, tabId });
-  }
+  if (waitForSelector) await handlers.wait_for({ selector: waitForSelector, timeout: waitForSelectorTimeout, tabId });
   return result;
 };
 
@@ -908,7 +1043,7 @@ handlers.extract_meta = async ({ tabId }) => {
       else if (prop) result.meta[prop] = content;
     });
     document.querySelectorAll('script[type="application/ld+json"]').forEach((s) => {
-      try { result.jsonLd.push(JSON.parse(s.textContent)); } catch {}
+      try { result.jsonLd.push(JSON.parse(s.textContent)); } catch { }
     });
     return result;
   }, []);
@@ -995,79 +1130,153 @@ handlers.set_cookies = async ({ url, name, value, domain, path = "/", secure, ht
 handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId }) => {
   return await injectAndRun(tabId, (txt, elType, isExact, css, svg) => {
     const clickable = elType === "button"
-      ? 'button, [role="button"], input[type="button"], input[type="submit"], a'
-      : elType === "link" ? "a" : "*";
+      ? 'button,[role="button"],input[type="button"],input[type="submit"],a,[role="tab"],[role="menuitem"],[role="option"]'
+      : elType === "link" ? "a" : 'button,[role="button"],a,[role="tab"],[role="menuitem"],[role="option"],[onclick],[tabindex],*';
     const candidates = Array.from(document.querySelectorAll(clickable));
-    const el = candidates.find(e => {
-      const t = e.textContent?.trim();
-      return isExact ? t === txt : t?.includes(txt);
+    const matches = candidates.filter(e => {
+      const t = (e.textContent || "").trim();
+      return isExact ? t === txt : t.includes(txt);
     });
-    if (!el) throw new Error(`No element with text "${txt}" found (type: ${elType})`);
+    if (!matches.length) throw new Error(`No element with text "${txt}" found (type: ${elType})`);
+    const el = matches.reduce((best, cur) => {
+      const bt = (best.textContent || "").trim(), ct = (cur.textContent || "").trim();
+      if (ct === txt && bt !== txt) return cur;
+      if (bt === txt && ct !== txt) return best;
+      return ct.length < bt.length ? cur : best;
+    });
 
+    // Scroll into view
+    const r0 = el.getBoundingClientRect();
+    if (r0.top < 0 || r0.bottom > window.innerHeight) el.scrollIntoView({ block: "center", behavior: "instant" });
     const rect = el.getBoundingClientRect();
     const tx = rect.left + rect.width / 2, ty = rect.top + rect.height / 2;
-    document.querySelectorAll(".__bmcp-cursor, .__bmcp-ripple, .__bmcp-cursor-style").forEach(e => e.remove());
+
+    document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style,.__bmcp-badge,.__bmcp-target,.__bmcp-spotlight").forEach(e => e.remove());
     const s = document.createElement("style"); s.className = "__bmcp-cursor-style"; s.textContent = css; document.head.appendChild(s);
 
-    const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 100, 0) };
-    window.__bmcp_cursorPos = { x: tx, y: ty };
+    // Spotlight
+    const spot = document.createElement("div"); spot.className = "__bmcp-spotlight"; document.body.appendChild(spot);
 
+    const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 80, 0) };
+    window.__bmcp_cursorPos = { x: tx, y: ty };
     const c = document.createElement("div"); c.className = "__bmcp-cursor"; c.innerHTML = svg;
-    c.style.left = (prev.x - 5) + "px"; c.style.top = (prev.y - 2) + "px";
-    c.style.opacity = "0"; document.body.appendChild(c);
+    c.style.left = (prev.x - 4) + "px"; c.style.top = (prev.y - 2) + "px"; c.style.opacity = "0";
+    document.body.appendChild(c);
+
+    const badge = document.createElement("div"); badge.className = "__bmcp-badge";
+    badge.innerHTML = '<span style="font-size:13px">⌥</span><span>Click</span>';
+    badge.style.left = (prev.x + 22) + "px"; badge.style.top = (prev.y - 13) + "px";
+    document.body.appendChild(badge);
 
     return new Promise(resolve => {
       requestAnimationFrame(() => {
         c.style.opacity = "1";
-        c.style.left = (tx - 5) + "px"; c.style.top = (ty - 2) + "px";
+        c.style.left = (tx - 4) + "px"; c.style.top = (ty - 2) + "px";
+        badge.style.left = (tx + 22) + "px"; badge.style.top = (ty - 13) + "px";
+
         setTimeout(() => {
+          const tring = document.createElement("div"); tring.className = "__bmcp-target";
+          tring.style.cssText = `left:${rect.left - 4}px;top:${rect.top - 4}px;width:${rect.width + 8}px;height:${rect.height + 8}px`;
+          document.body.appendChild(tring);
           c.classList.add("--press");
-          const r1 = document.createElement("div"); r1.className = "__bmcp-ripple --fill";
-          r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
-          const r2 = document.createElement("div"); r2.className = "__bmcp-ripple --ring";
-          r2.style.left = tx + "px"; r2.style.top = ty + "px"; document.body.appendChild(r2);
+
           setTimeout(() => {
             c.classList.remove("--press");
+            const r1 = document.createElement("div"); r1.className = "__bmcp-ripple --fill";
+            r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
+            const rr = document.createElement("div"); rr.className = "__bmcp-ripple --ring";
+            rr.style.left = tx + "px"; rr.style.top = ty + "px"; document.body.appendChild(rr);
             el.click();
-            resolve({ clicked: true, tagName: el.tagName, text: el.textContent?.trim().slice(0, 200) });
-          }, 110);
-          setTimeout(() => { c.style.opacity = "0"; }, 380);
-          setTimeout(() => { document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style").forEach(e => e.remove()); }, 750);
-        }, 300);
+            badge.classList.add("--done");
+            badge.innerHTML = '<span style="font-size:13px">✓</span><span>Done</span>';
+            resolve({ clicked: true, tagName: el.tagName, text: (el.textContent || '').trim().slice(0, 200) });
+            setTimeout(() => { c.style.opacity = "0"; badge.style.opacity = "0"; }, 300);
+            setTimeout(() => { document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style,.__bmcp-badge,.__bmcp-target,.__bmcp-spotlight").forEach(e => e.remove()); }, 820);
+          }, 90);
+        }, 280);
       });
     });
   }, [text, elementType, exact, CURSOR_CSS, CURSOR_SVG]);
 };
 
+
 handlers.type_by_label = async ({ label, text, tabId }) => {
-  showClickCursor(tabId, label + "::__ELTYPE__::label", "text");
-  return await injectAndRun(tabId, (lbl, txt) => {
-    // Strategy 1: Find <label> by text and use its `for` attribute
-    let el;
-    const labels = Array.from(document.querySelectorAll("label"));
-    const matchLabel = labels.find(l => l.textContent?.trim().includes(lbl));
-    if (matchLabel) {
-      const forId = matchLabel.getAttribute("for");
+  return await injectAndRun(tabId, (lbl, txt, css) => {
+    const lbl_l = lbl.toLowerCase();
+    let el = null;
+
+    // S1: <label> text → for= or nested input
+    const lbEls = Array.from(document.querySelectorAll("label"));
+    const matchLb = lbEls.find(l => (l.textContent || '').trim().toLowerCase().includes(lbl_l));
+    if (matchLb) {
+      const forId = matchLb.getAttribute("for");
       if (forId) el = document.getElementById(forId);
-      if (!el) el = matchLabel.querySelector("input, textarea, select");
+      if (!el) el = matchLb.querySelector("input,textarea,select");
     }
-    // Strategy 2: Find by placeholder
+    // S2: aria-label
+    if (!el) el = document.querySelector(`input[aria-label*="${lbl}" i],textarea[aria-label*="${lbl}" i],select[aria-label*="${lbl}" i]`);
+    // S3: placeholder
+    if (!el) el = document.querySelector(`input[placeholder*="${lbl}" i],textarea[placeholder*="${lbl}" i]`);
+    // S4: name attribute
+    if (!el) el = document.querySelector(`input[name*="${lbl}" i],textarea[name*="${lbl}" i],select[name*="${lbl}" i]`);
+    // S5: id contains label text
+    if (!el) el = document.querySelector(`input[id*="${lbl}" i],textarea[id*="${lbl}" i]`);
+    // S6: data-testid / data-label
+    if (!el) el = document.querySelector(`[data-testid*="${lbl}" i],[data-label*="${lbl}" i]`);
+    // S7: container text heuristic
     if (!el) {
-      el = document.querySelector(`input[placeholder*="${lbl}" i], textarea[placeholder*="${lbl}" i]`);
+      const allInputs = Array.from(document.querySelectorAll("input:not([type=hidden]),textarea,select"));
+      el = allInputs.find(inp => {
+        const parent = inp.closest("div,section,fieldset,li,tr");
+        return parent && (parent.textContent || '').toLowerCase().includes(lbl_l);
+      }) || null;
     }
-    // Strategy 3: Find by aria-label
-    if (!el) {
-      el = document.querySelector(`input[aria-label*="${lbl}" i], textarea[aria-label*="${lbl}" i]`);
-    }
-    if (!el) throw new Error(`No input found for label "${lbl}"`);
+    if (!el) throw new Error(`No input found for label "${lbl}". Tried label/aria-label/placeholder/name/id/data-testid/container-text.`);
+
+    // Scroll into view if needed
+    const r0 = el.getBoundingClientRect();
+    if (r0.top < 0 || r0.bottom > window.innerHeight) el.scrollIntoView({ block: "center", behavior: "instant" });
+    const rect = el.getBoundingClientRect();
+
+    // ── Visual: typing glow ring + badge ────────────────────────────────────
+    document.querySelectorAll(".__bmcp-cursor-style,.__bmcp-type-ring,.__bmcp-badge").forEach(e => e.remove());
+    const styleEl = document.createElement("style"); styleEl.className = "__bmcp-cursor-style"; styleEl.textContent = css; document.head.appendChild(styleEl);
+
+    // Glow ring around the field
+    const ring = document.createElement("div"); ring.className = "__bmcp-type-ring";
+    ring.style.cssText = `left:${rect.left - 3}px;top:${rect.top - 3}px;width:${rect.width + 6}px;height:${rect.height + 6}px`;
+    document.body.appendChild(ring);
+
+    // Badge above the field: "✎ Typing..."
+    const badge = document.createElement("div"); badge.className = "__bmcp-badge";
+    badge.innerHTML = '<span style="font-size:13px">✎</span><span>Typing…</span>';
+    // Position badge above the field (or below if field is near top)
+    const bTop = rect.top > 40 ? rect.top - 34 : rect.bottom + 8;
+    badge.style.cssText = `left:${rect.left}px;top:${bTop}px`;
+    document.body.appendChild(badge);
+
+    // Focus and fill using native setter (React/Vue/Angular compatible)
     el.focus();
+    el.select?.();
     const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement : HTMLInputElement;
     const nativeSetter = Object.getOwnPropertyDescriptor(proto.prototype, "value")?.set;
     if (nativeSetter) { nativeSetter.call(el, txt); } else { el.value = txt; }
-    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, data: txt, inputType: "insertText" }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
-    return { typed: true, tagName: el.tagName, id: el.id || null };
-  }, [label, text]);
+
+    // Update badge to "✓ Filled" then clean up
+    setTimeout(() => {
+      badge.classList.add("--done");
+      badge.innerHTML = '<span style="font-size:13px">✓</span><span>Filled</span>';
+    }, 200);
+    setTimeout(() => {
+      badge.style.opacity = "0";
+      document.querySelectorAll(".__bmcp-type-ring").forEach(e => e.remove());
+    }, 700);
+    setTimeout(() => document.querySelectorAll(".__bmcp-type-ring,.__bmcp-cursor-style,.__bmcp-badge").forEach(e => e.remove()), 1000);
+
+    return { typed: true, tagName: el.tagName, id: el.id || null, strategy: "multi-strategy" };
+  }, [label, text, CURSOR_CSS]);
 };
 
 handlers.get_interactive_elements = async ({ tabId, filter }) => {
