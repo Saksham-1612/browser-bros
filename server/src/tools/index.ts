@@ -9,6 +9,7 @@ import { registerInteractionTools } from "./interaction.js";
 import { registerMonitoringTools } from "./monitoring.js";
 import { registerWindowTools } from "./window.js";
 import { registerContentTools } from "./content.js";
+import { registerTextTargetingTools } from "./text-targeting.js";
 
 
 export function registerAllTools(server: McpServer, bridge: WebSocketBridge) {
@@ -20,4 +21,5 @@ export function registerAllTools(server: McpServer, bridge: WebSocketBridge) {
   registerMonitoringTools(server, bridge);
   registerWindowTools(server, bridge);
   registerContentTools(server, bridge);
+  registerTextTargetingTools(server, bridge);
 }

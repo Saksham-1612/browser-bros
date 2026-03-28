@@ -21,13 +21,14 @@ export function registerInteractionTools(server: McpServer, bridge: WebSocketBri
     },
     async ({ fields, tabId }) => {
       const results = (await bridge.sendCommand("fill_form", { fields, tabId })) as Array<{
-        field: string; filled?: boolean; type?: string; error?: string; checked?: boolean; selectedText?: string;
+        field: string; filled?: boolean; type?: string; error?: string; checked?: boolean; selectedText?: string; strategy?: string;
       }>;
       const lines = results.map((r) => {
+        const via = r.strategy ? ` [via ${r.strategy}]` : "";
         if (r.error) return `✗ ${r.field}: ${r.error}`;
-        if (r.type === "select") return `✓ ${r.field}: selected "${r.selectedText}"`;
-        if (r.type === "checkbox" || r.type === "radio") return `✓ ${r.field}: ${r.checked ? "checked" : "unchecked"}`;
-        return `✓ ${r.field}: filled`;
+        if (r.type === "select") return `✓ ${r.field}${via}: selected "${r.selectedText}"`;
+        if (r.type === "checkbox" || r.type === "radio") return `✓ ${r.field}${via}: ${r.checked ? "checked" : "unchecked"}`;
+        return `✓ ${r.field}${via}: filled`;
       });
       const failed = results.filter((r) => r.error).length;
       const summary = `Filled ${results.length - failed}/${results.length} fields` + (failed ? ` (${failed} failed)` : "");

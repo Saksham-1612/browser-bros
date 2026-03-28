@@ -24,10 +24,12 @@ export function registerExtractionTools(server: McpServer, bridge: WebSocketBrid
       selector: z.string().describe("CSS selector"),
       attributes: z.array(z.string()).optional().default(["textContent", "href", "src", "alt", "value", "class", "id"]),
       limit: z.number().optional().default(50).describe("Max elements to return"),
+      maxTextLength: z.number().optional().default(300).describe("Max characters for textContent/innerText fields (default 300)"),
+      includeInnerText: z.boolean().optional().default(false).describe("Also include innerText (rendered visible text only, no hidden child noise) alongside textContent"),
       tabId: z.number().optional(),
     },
-    async ({ selector, attributes, limit, tabId }) => {
-      const result = await bridge.sendCommand("get_elements", { selector, attributes, limit, tabId });
+    async ({ selector, attributes, limit, maxTextLength, includeInnerText, tabId }) => {
+      const result = await bridge.sendCommand("get_elements", { selector, attributes, limit, maxTextLength, includeInnerText, tabId });
       return jsonResult(result);
     }
   );

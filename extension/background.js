@@ -343,7 +343,12 @@ handlers.click = async ({ selector, tabId }) => {
           setTimeout(() => {
             c.classList.remove("--press");
             el.click();
-            resolve(true);
+            resolve({
+              clicked: true,
+              tagName: el.tagName,
+              text: el.textContent?.trim().slice(0, 200) || "",
+              wasVisible: rect.width > 0 || rect.height > 0,
+            });
           }, 110);
 
           setTimeout(() => { c.style.opacity = "0"; }, 380);
@@ -481,6 +486,36 @@ handlers.wait_for = async ({ selector, timeout = 10000, tabId }) => {
   }, [selector, timeout]);
 };
 
+handlers.wait_for_navigation = async ({ urlPattern, timeout = 10000, tabId }) => {
+  const tab = await getTargetTab(tabId);
+  const startUrl = tab.url || "";
+  const start = Date.now();
+  return new Promise((resolve, reject) => {
+    const check = async () => {
+      if (Date.now() - start > timeout) {
+        reject(new Error(`Navigation timeout after ${timeout}ms (still at ${startUrl})`));
+        return;
+      }
+      try {
+        const currentTab = await chrome.tabs.get(tab.id);
+        const currentUrl = currentTab.url || "";
+        const urlChanged = currentUrl !== startUrl && currentUrl !== "about:blank";
+        const patternMatch = urlPattern ? currentUrl.includes(urlPattern) : urlChanged;
+        if (patternMatch) {
+          // Brief pause to let SPA finish rendering after URL change
+          await new Promise(r => setTimeout(r, 200));
+          resolve({ url: currentUrl, navigated: true });
+        } else {
+          setTimeout(check, 150);
+        }
+      } catch {
+        reject(new Error("Tab no longer available"));
+      }
+    };
+    setTimeout(check, 150);
+  });
+};
+
 handlers.new_tab = async ({ url }) => {
   const tab = await chrome.tabs.create({ url: url || "about:blank", active: true });
   return { tabId: tab.id, url: tab.url || url || "about:blank" };
@@ -528,19 +563,20 @@ handlers.get_links = async ({ tabId, filter }) => {
   }, [filter || null]);
 };
 
-handlers.get_elements = async ({ selector, attributes = ["textContent", "href", "src", "alt", "value", "class", "id"], limit = 50, tabId }) => {
-  return await injectAndRun(tabId, (sel, attrs, lim) => {
+handlers.get_elements = async ({ selector, attributes = ["textContent", "href", "src", "alt", "value", "class", "id"], limit = 50, maxTextLength = 300, includeInnerText = false, tabId }) => {
+  return await injectAndRun(tabId, (sel, attrs, lim, maxLen, withInnerText) => {
     const els = Array.from(document.querySelectorAll(sel)).slice(0, lim);
     return els.map((el) => {
       const obj = { tagName: el.tagName };
       for (const attr of attrs) {
-        if (attr === "textContent") obj[attr] = el.textContent?.trim().slice(0, 500) || "";
+        if (attr === "textContent") obj[attr] = el.textContent?.trim().slice(0, maxLen) || "";
         else if (attr in el) obj[attr] = el[attr] ?? "";
         else obj[attr] = el.getAttribute(attr) ?? "";
       }
+      if (withInnerText) obj.innerText = el.innerText?.trim().slice(0, maxLen) || "";
       return obj;
     });
-  }, [selector, attributes, limit]);
+  }, [selector, attributes, limit, maxTextLength, includeInnerText]);
 };
 
 handlers.extract_table = async ({ selector = "table", tabId }) => {
@@ -1146,7 +1182,7 @@ handlers.fill_form = async ({ fields, tabId }) => {
       // Strategy 1: CSS selector
       if (fieldDef.selector) {
         const el = document.querySelector(fieldDef.selector);
-        if (el) return el;
+        if (el) return { el, strategy: "selector" };
       }
       // Strategy 2: label text → for attr or nested input
       if (fieldDef.label) {
@@ -1155,18 +1191,19 @@ handlers.fill_form = async ({ fields, tabId }) => {
         const matchLabel = labels.find(l => l.textContent?.trim().toLowerCase().includes(lbl.toLowerCase()));
         if (matchLabel) {
           const forId = matchLabel.getAttribute("for");
-          if (forId) { const el = document.getElementById(forId); if (el) return el; }
+          if (forId) { const el = document.getElementById(forId); if (el) return { el, strategy: "label[for]" }; }
           const nested = matchLabel.querySelector("input, textarea, select");
-          if (nested) return nested;
+          if (nested) return { el: nested, strategy: "label>nested" };
         }
-        // Strategy 3: placeholder / aria-label match
-        const byAttr = document.querySelector(
-          `input[placeholder*="${lbl}" i], textarea[placeholder*="${lbl}" i], input[aria-label*="${lbl}" i], textarea[aria-label*="${lbl}" i]`
-        );
-        if (byAttr) return byAttr;
-        // Strategy 4: name attribute match
+        // Strategy 3: aria-label match
+        const byAria = document.querySelector(`input[aria-label*="${lbl}" i], textarea[aria-label*="${lbl}" i]`);
+        if (byAria) return { el: byAria, strategy: "aria-label" };
+        // Strategy 4: placeholder match
+        const byPlaceholder = document.querySelector(`input[placeholder*="${lbl}" i], textarea[placeholder*="${lbl}" i]`);
+        if (byPlaceholder) return { el: byPlaceholder, strategy: "placeholder" };
+        // Strategy 5: name attribute match
         const byName = document.querySelector(`input[name*="${lbl}" i], textarea[name*="${lbl}" i]`);
-        if (byName) return byName;
+        if (byName) return { el: byName, strategy: "name" };
       }
       return null;
     }
@@ -1200,13 +1237,13 @@ handlers.fill_form = async ({ fields, tabId }) => {
 
     const results = [];
     for (const field of fieldsData) {
-      const el = resolveElement(field);
-      if (!el) {
+      const resolved = resolveElement(field);
+      if (!resolved) {
         results.push({ field: field.selector || field.label, error: "Element not found" });
         continue;
       }
-      const info = fillElement(el, String(field.value));
-      results.push({ field: field.selector || field.label, ...info });
+      const info = fillElement(resolved.el, String(field.value));
+      results.push({ field: field.selector || field.label, strategy: resolved.strategy, ...info });
     }
     return results;
   }, [fields]);

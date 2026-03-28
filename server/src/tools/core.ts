@@ -65,13 +65,20 @@ export function registerCoreTools(server: McpServer, bridge: WebSocketBridge) {
 
   server.tool(
     "browser_click",
-    "Click on an element in the page identified by CSS selector.",
+    "Click on an element in the page identified by CSS selector. Returns the clicked element's tag and visible text so you can confirm the right target was hit.",
     {
       selector: z.string().describe("CSS selector of the element to click"),
+      waitMs: z.number().optional().default(0).describe("Extra ms to wait after click for SPA route transitions or animations"),
       tabId: z.number().optional().describe("Tab ID. If omitted, uses active tab."),
     },
-    async ({ selector, tabId }) => {
-      await bridge.sendCommand("click", { selector, tabId });
+    async ({ selector, waitMs, tabId }) => {
+      const result = (await bridge.sendCommand("click", { selector, tabId })) as {
+        clicked: boolean; tagName: string; text: string; wasVisible: boolean;
+      } | boolean;
+      if (waitMs && waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+      if (result && typeof result === "object" && "tagName" in result) {
+        return textResult(`Clicked: <${result.tagName}> "${result.text}"${result.wasVisible ? "" : " (was not visible)"}`);
+      }
       return textResult(`Clicked element: ${selector}`);
     }
   );

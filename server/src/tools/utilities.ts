@@ -70,4 +70,20 @@ export function registerUtilityTools(server: McpServer, bridge: WebSocketBridge)
       return jsonResult(result);
     }
   );
+
+  server.tool(
+    "browser_wait_for_navigation",
+    "Wait for the page URL to change or match a pattern. Use this after clicking links or submitting forms in SPAs to ensure the route transition has completed before reading the new page.",
+    {
+      urlPattern: z.string().optional().describe("URL substring to wait for (e.g. '/dashboard', '/aiagents/'). If omitted, waits for any URL change from current."),
+      timeout: z.number().optional().default(10000).describe("Timeout in ms (default 10000)"),
+      tabId: z.number().optional().describe("Tab ID. If omitted, uses active tab."),
+    },
+    async ({ urlPattern, timeout, tabId }) => {
+      const result = (await bridge.sendCommand("wait_for_navigation", { urlPattern, timeout, tabId })) as {
+        url: string; navigated: boolean;
+      };
+      return textResult(`Navigated to: ${result.url}`);
+    }
+  );
 }
