@@ -15,15 +15,44 @@ let keepaliveTimer = null;
 let fastPollTimer = null;
 
 // ============================================================
-// Action Cache (LRU in-memory)
+// Action Cache (persisted to chrome.storage.local)
 // ============================================================
 
 const actionCache = new Map();
 const ACTION_CACHE_MAX = 500;
-const ACTION_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+const ACTION_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const CACHE_STORAGE_KEY = '_bmcp_action_cache';
+
+// Load persisted cache on service worker startup
+(async () => {
+  try {
+    const data = await chrome.storage.local.get(CACHE_STORAGE_KEY);
+    if (Array.isArray(data[CACHE_STORAGE_KEY])) {
+      const now = Date.now();
+      for (const [key, entry] of data[CACHE_STORAGE_KEY]) {
+        if (now - entry.timestamp < ACTION_CACHE_TTL) {
+          actionCache.set(key, entry);
+        }
+      }
+      console.log(`[Cache] Loaded ${actionCache.size} entries from storage`);
+    }
+  } catch (e) { console.warn('[Cache] Failed to load from storage:', e); }
+})();
+
+let _persistTimer = null;
+function persistCache() {
+  clearTimeout(_persistTimer);
+  _persistTimer = setTimeout(async () => {
+    try {
+      await chrome.storage.local.set({ [CACHE_STORAGE_KEY]: Array.from(actionCache.entries()) });
+    } catch {}
+  }, 500);
+}
 
 function getActionCacheKey(url, action, target) {
-  return `${url}:${action}:${target}`;
+  // Normalize target: lowercase + collapse whitespace for better hit rate
+  const normTarget = (target || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return `${url}:${action}:${normTarget}`;
 }
 
 function getCachedAction(url, action, target) {
@@ -47,6 +76,7 @@ function saveCachedAction(url, action, target, result, selector, selectorType) {
     timestamp: Date.now(),
     successCount: (actionCache.get(key)?.successCount || 0) + 1
   });
+  persistCache();
 }
 
 // ============================================================
@@ -194,15 +224,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Mark processing started and clear any stale pending response for this tab
     chrome.storage.local.set({ [processingKey]: true });
     chrome.storage.local.remove(pendingKey);
+    const progressKey = `_chat_tool_progress_${tabId}`;
     processChatMessage(msg, tabId)
       .then(resp => {
-        // Write pending response and clear processing flag atomically
         chrome.storage.local.set({ [pendingKey]: resp, [processingKey]: false });
+        chrome.storage.local.remove(progressKey);
         sendResponse(resp);
       })
       .catch(e => {
         const errResp = { error: e.message || String(e) };
         chrome.storage.local.set({ [pendingKey]: errResp, [processingKey]: false });
+        chrome.storage.local.remove(progressKey);
         sendResponse(errResp);
       });
     return true;
@@ -311,7 +343,7 @@ async function executeChatTool(name, args, tabId) {
     case "read_page":      return await handlers.read_page({ tabId, format: args.format || "text" });
     case "click":          return await handlers.click({ tabId, selector: args.selector, target: args.target });
     case "type":           return await handlers.type({ tabId, selector: args.selector, text: args.text });
-    case "navigate":       return await handlers.navigate({ tabId, url: args.url, waitMs: 2000 });
+    case "navigate":       return await handlers.navigate({ tabId, url: args.url });
     case "scroll":         return await handlers.scroll({ tabId, direction: args.direction, pixels: args.pixels, selector: args.selector });
     case "inspect_page":   return await handlers.inspect_page({ tabId });
     case "get_links":      return await handlers.get_links({ tabId, filter: args.filter });
@@ -324,6 +356,14 @@ async function executeChatTool(name, args, tabId) {
     case "fill_form":      return await handlers.fill_form({ tabId, fields: args.fields });
     default: throw new Error(`Unknown tool: ${name}`);
   }
+}
+
+// Write live tool progress to storage so the restored content script can show it
+function broadcastToolEvent(tabId, type, toolName, extra = {}) {
+  if (!tabId) return;
+  const key = `_chat_tool_progress_${tabId}`;
+  chrome.storage.local.set({ [key]: { type, name: toolName, ts: Date.now(), ...extra } });
+  chrome.tabs.sendMessage(tabId, { type, tool: toolName, ...extra }).catch(() => {});
 }
 
 function truncateToolResult(result) {
@@ -353,11 +393,13 @@ ${pageContext}
 Guidelines:
 - Use read_page to understand what's on the current page before taking actions.
 - Use inspect_page to discover interactive elements (buttons, inputs, links).
-- For clicking, prefer click_by_text on dynamic sites, or use CSS selectors for specific elements.
+- For product/listing pages: prefer get_links to find the product URL, then use navigate to open it — this is faster and more reliable than clicking.
+- For clicking buttons (Add to Cart, Buy Now, etc.): use click_by_text with the exact button text.
 - Use fill_form for filling multiple form fields efficiently.
 - Keep responses concise and helpful.
 - When you perform actions, briefly describe what you did and the result.
-- If a tool fails, try alternative approaches (different selector strategies, etc).`;
+- If a tool fails, try alternative approaches (get_links then navigate, different text, inspect_page first).
+- On e-commerce sites: search → get_links to find product → navigate to it → read_page → click_by_text for actions.`;
 
   if (provider === "openai") {
     return await chatWithOpenAI(apiKey, model, systemPrompt, messages, tabId);
@@ -400,8 +442,7 @@ async function chatWithOpenAI(apiKey, model, systemPrompt, history, tabId) {
         try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
         const toolName = tc.function.name;
 
-        // Notify content script
-        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_start", tool: toolName, args }).catch(() => {});
+        broadcastToolEvent(tabId, "chat_tool_start", toolName, { args });
 
         let result;
         try {
@@ -413,7 +454,7 @@ async function chatWithOpenAI(apiKey, model, systemPrompt, history, tabId) {
         const resultStr = truncateToolResult(result);
         toolsUsed.push({ name: toolName, args, fromCache: result?.fromCache });
 
-        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_done", tool: toolName, fromCache: result?.fromCache }).catch(() => {});
+        broadcastToolEvent(tabId, "chat_tool_done", toolName, { fromCache: result?.fromCache });
 
         openaiMessages.push({ role: "tool", tool_call_id: tc.id, content: resultStr });
       }
@@ -478,7 +519,7 @@ async function chatWithClaude(apiKey, model, systemPrompt, history, tabId) {
         const toolName = tu.name;
         const args = tu.input || {};
 
-        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_start", tool: toolName, args }).catch(() => {});
+        broadcastToolEvent(tabId, "chat_tool_start", toolName, { args });
 
         let result;
         try {
@@ -490,7 +531,7 @@ async function chatWithClaude(apiKey, model, systemPrompt, history, tabId) {
         const resultStr = truncateToolResult(result);
         toolsUsed.push({ name: toolName, args, fromCache: result?.fromCache });
 
-        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_done", tool: toolName, fromCache: result?.fromCache }).catch(() => {});
+        broadcastToolEvent(tabId, "chat_tool_done", toolName, { fromCache: result?.fromCache });
 
         toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: resultStr });
       }
@@ -523,11 +564,24 @@ async function getTargetTab(tabId) {
   return tab;
 }
 
-function waitForTabLoad(tabId, timeoutMs = 30000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error("Tab load timed out")); }, timeoutMs);
+async function waitForTabLoad(tabId, timeoutMs = 15000) {
+  // Fast path: tab may already be complete
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status === 'complete') return;
+  } catch {}
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(); // Don't reject — proceed even if slow
+    }, timeoutMs);
     function listener(id, info) {
-      if (id === tabId && info.status === "complete") { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve(); }
+      if (id === tabId && info.status === 'complete') {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
     }
     chrome.tabs.onUpdated.addListener(listener);
   });
@@ -708,21 +762,26 @@ const handlers = {};
 
 // --- CORE ---
 
-handlers.navigate = async ({ tabId, url, waitMs = 1000 }) => {
+handlers.navigate = async ({ tabId, url, waitMs = 400 }) => {
   let targetTabId = tabId;
   if (targetTabId) {
-    // Navigate the current tab instead of opening a new one
     await chrome.tabs.update(targetTabId, { url, active: true });
     await waitForTabLoad(targetTabId);
   } else {
-    // Fallback: create new tab if no current tab available
     const tab = await chrome.tabs.create({ url, active: true });
     targetTabId = tab.id;
-    if (tab.status !== "complete") await waitForTabLoad(targetTabId);
+    if (tab.status !== 'complete') await waitForTabLoad(targetTabId);
   }
-  if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
   if (!isInjectableUrl(url)) return { title: url, url, text: `[Cannot extract content from ${url}]`, meta: {} };
-  return await extractContent(targetTabId, "text");
+  // Smart settle: extract immediately after load, retry if DOM not populated yet
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0 || waitMs > 0) await new Promise(r => setTimeout(r, attempt === 0 ? waitMs : 400));
+    try {
+      const content = await extractContent(targetTabId, 'text');
+      if (content?.text?.length > 200) return content;
+    } catch {}
+  }
+  return await extractContent(targetTabId, 'text');
 };
 
 handlers.read_page = async ({ tabId, format = "text" }) => {
@@ -808,7 +867,7 @@ handlers.click = async ({ selector, tabId, waitForSelector, waitForSelectorTimeo
           return { clicked: true, tagName: el.tagName, text: (el.textContent || '').trim().slice(0, 200) };
         }, [cached.selector, CURSOR_CSS, CURSOR_SVG]);
         if (cachedResult?.isBlankTarget && cachedResult?.href) {
-          return await handlers.navigate({ tabId, url: cachedResult.href, waitMs: 2000 });
+          return await handlers.navigate({ tabId, url: cachedResult.href, waitMs: 400 });
         }
         return { ...cachedResult, fromCache: true };
       } catch {}
@@ -919,7 +978,7 @@ handlers.click = async ({ selector, tabId, waitForSelector, waitForSelectorTimeo
 
   // Intercept target="_blank" — navigate current tab instead
   if (result?.isBlankTarget && result?.href) {
-    return await handlers.navigate({ tabId, url: result.href, waitMs: 2000 });
+    return await handlers.navigate({ tabId, url: result.href, waitMs: 400 });
   }
 
   // Save to cache on success
@@ -1567,14 +1626,19 @@ handlers.set_cookies = async ({ url, name, value, domain, path = "/", secure, ht
 
 handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId, target }) => {
   // Try cache first
+  // ── Cache lookup ─────────────────────────────────────────────────────────
   try {
     const page = await getTargetTab(tabId);
     const url = page.url;
     const targetName = target || text;
     const cached = getCachedAction(url, "click", targetName);
     if (cached) {
-      console.log('[Cache] Using cached selector for click_by_text:', cached.selector);
+      console.log('[Cache HIT] click_by_text:', targetName, cached.selectorType, cached.selector);
       try {
+        // For href-cached links, navigate directly (fastest path)
+        if (cached.selectorType === 'href' && cached.selector) {
+          return await handlers.navigate({ tabId, url: cached.selector, waitMs: 400 });
+        }
         const cachedResult = await injectAndRun(tabId, (sel) => {
           const el = document.querySelector(sel);
           if (!el) throw new Error('Cached element not found');
@@ -1585,33 +1649,99 @@ handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId,
           return { clicked: true, tagName: el.tagName, text: (el.textContent || '').trim().slice(0, 200) };
         }, [cached.selector]);
         if (cachedResult?.isBlankTarget && cachedResult?.href) {
-          return await handlers.navigate({ tabId, url: cachedResult.href, waitMs: 2000 });
+          return await handlers.navigate({ tabId, url: cachedResult.href, waitMs: 400 });
         }
         return { ...cachedResult, fromCache: true };
-      } catch {}
+      } catch { /* fall through to fresh search */ }
     }
   } catch {}
 
-  return await injectAndRun(tabId, (txt, elType, isExact, css, svg) => {
-    const clickable = elType === "button"
+  const result = await injectAndRun(tabId, (txt, elType, isExact, css, svg) => {
+    // Helpers
+    const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const normTxt = norm(txt);
+
+    // Build a stable CSS selector for an element (for caching)
+    function buildSelector(el) {
+      if (el.id) return '#' + CSS.escape(el.id);
+      for (const attr of ['data-testid','data-test-id','data-cy','data-qa']) {
+        if (el.getAttribute(attr)) return `[${attr}="${CSS.escape(el.getAttribute(attr))}"]`;
+      }
+      // nth-child path (up to 4 levels)
+      const parts = [];
+      let cur = el;
+      for (let i = 0; i < 4 && cur && cur !== document.body; i++) {
+        let seg = cur.tagName.toLowerCase();
+        if (cur.id) { seg = '#' + CSS.escape(cur.id); parts.unshift(seg); break; }
+        const siblings = cur.parentElement ? Array.from(cur.parentElement.children).filter(s => s.tagName === cur.tagName) : [];
+        if (siblings.length > 1) seg += `:nth-of-type(${siblings.indexOf(cur) + 1})`;
+        parts.unshift(seg);
+        cur = cur.parentElement;
+      }
+      return parts.join(' > ');
+    }
+
+    const clickableSelectors = elType === "button"
       ? 'button,[role="button"],input[type="button"],input[type="submit"],a,[role="tab"],[role="menuitem"],[role="option"]'
-      : elType === "link" ? "a" : 'button,[role="button"],a,[role="tab"],[role="menuitem"],[role="option"],[onclick],[tabindex],summary,label,select,details';
-    const candidates = Array.from(document.querySelectorAll(clickable));
-    const matches = candidates.filter(e => {
-      const t = (e.textContent || "").trim();
-      return isExact ? t === txt : t.includes(txt);
+      : elType === "link" ? "a"
+      : 'button,[role="button"],a,[role="tab"],[role="menuitem"],[role="option"],[onclick],summary,select,details';
+
+    const candidates = Array.from(document.querySelectorAll(clickableSelectors));
+
+    // Strategy 1: direct text match on clickable elements (case-insensitive, whitespace-normalized)
+    let matches = candidates.filter(e => {
+      const t = norm(e.textContent);
+      return isExact ? t === normTxt : t.includes(normTxt);
     });
+
+    // Strategy 2: TreeWalker — find text nodes matching the query, walk up to clickable ancestor
+    if (!matches.length) {
+      const seen = new Set();
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (!norm(node.textContent).includes(normTxt)) continue;
+        let el = node.parentElement;
+        while (el && el !== document.body) {
+          if (!seen.has(el) && el.matches('a,button,[role="button"],[onclick],[role="tab"],[role="menuitem"]')) {
+            seen.add(el);
+            matches.push(el);
+            break;
+          }
+          el = el.parentElement;
+        }
+      }
+    }
+
+    // Strategy 3: aria-label / title / placeholder match
+    if (!matches.length) {
+      const byAttr = Array.from(document.querySelectorAll('[aria-label],[title],[placeholder]')).filter(e => {
+        const al = norm(e.getAttribute('aria-label') || e.getAttribute('title') || e.getAttribute('placeholder'));
+        return al.includes(normTxt);
+      });
+      matches = byAttr;
+    }
+
     if (!matches.length) throw new Error(`No element with text "${txt}" found (type: ${elType})`);
+
+    // Rank: exact match > highest text-coverage ratio > shortest textContent
     const el = matches.reduce((best, cur) => {
-      const bt = (best.textContent || "").trim(), ct = (cur.textContent || "").trim();
-      if (ct === txt && bt !== txt) return cur;
-      if (bt === txt && ct !== txt) return best;
+      const bt = norm(best.textContent), ct = norm(cur.textContent);
+      if (ct === normTxt && bt !== normTxt) return cur;
+      if (bt === normTxt && ct !== normTxt) return best;
+      const bf = bt.length > 0 ? normTxt.length / bt.length : 0;
+      const cf = ct.length > 0 ? normTxt.length / ct.length : 0;
+      if (Math.abs(cf - bf) > 0.08) return cf > bf ? cur : best;
       return ct.length < bt.length ? cur : best;
     });
 
     // Same-tab navigation for target="_blank" anchors
     if (el.tagName === 'A' && el.href && el.target && el.target !== '_self') {
-      return { clicked: false, isBlankTarget: true, href: el.href };
+      return { clicked: false, isBlankTarget: true, href: el.href, generatedSelector: buildSelector(el) };
+    }
+    // Regular anchor — also return href for caching
+    if (el.tagName === 'A' && el.href) {
+      return { clicked: false, isBlankTarget: true, href: el.href, generatedSelector: buildSelector(el) };
     }
 
     // Scroll into view
@@ -1622,8 +1752,6 @@ handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId,
 
     document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style,.__bmcp-badge,.__bmcp-target,.__bmcp-spotlight").forEach(e => e.remove());
     const s = document.createElement("style"); s.className = "__bmcp-cursor-style"; s.textContent = css; document.head.appendChild(s);
-
-    // Spotlight
     const spot = document.createElement("div"); spot.className = "__bmcp-spotlight"; document.body.appendChild(spot);
 
     const prev = window.__bmcp_cursorPos || { x: tx, y: Math.max(ty - 80, 0) };
@@ -1655,7 +1783,6 @@ handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId,
             r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
             const rr = document.createElement("div"); rr.className = "__bmcp-ripple --ring";
             rr.style.left = tx + "px"; rr.style.top = ty + "px"; document.body.appendChild(rr);
-            // Full pointer/mouse event sequence for React synthetic events
             const evOpts = { bubbles: true, cancelable: true, view: window, clientX: tx, clientY: ty };
             el.dispatchEvent(new MouseEvent("pointerover", evOpts));
             el.dispatchEvent(new MouseEvent("mouseover", evOpts));
@@ -1667,32 +1794,34 @@ handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId,
             el.click();
             badge.classList.add("--done");
             badge.innerHTML = '<span style="font-size:13px">✓</span><span>Done</span>';
-            resolve({ clicked: true, tagName: el.tagName, text: (el.textContent || '').trim().slice(0, 200) });
+            resolve({ clicked: true, tagName: el.tagName, text: norm(el.textContent).slice(0, 200), generatedSelector: buildSelector(el) });
             setTimeout(() => { c.style.opacity = "0"; badge.style.opacity = "0"; }, 300);
             setTimeout(() => { document.querySelectorAll(".__bmcp-cursor,.__bmcp-ripple,.__bmcp-cursor-style,.__bmcp-badge,.__bmcp-target,.__bmcp-spotlight").forEach(e => e.remove()); }, 820);
           }, 90);
         }, 280);
       });
     });
-  }, [text, elementType, exact, CURSOR_CSS, CURSOR_SVG]).then(async result => {
-    // Intercept target="_blank" — navigate current tab instead
-    if (result?.isBlankTarget && result?.href) {
-      return await handlers.navigate({ tabId, url: result.href, waitMs: 2000 });
-    }
-    // Save to cache on success
-    if (result?.clicked) {
-      (async () => {
-        try {
-          const page = await getTargetTab(tabId);
-          const url = page.url;
-          // Generate a simple CSS selector based on tag and text
-          const sel = `button:contains("${text}")`;
-          saveCachedAction(url, "click", text, result, sel, "text");
-        } catch {}
-      })();
-    }
-    return result;
-  });
+  }, [text, elementType, exact, CURSOR_CSS, CURSOR_SVG]);
+
+  // Intercept target="_blank" (or any anchor) — navigate current tab instead
+  if (result?.isBlankTarget && result?.href) {
+    // Cache the href so next call navigates directly without searching the DOM
+    try {
+      const page = await getTargetTab(tabId);
+      saveCachedAction(page.url, "click", target || text, result, result.href, "href");
+    } catch {}
+    return await handlers.navigate({ tabId, url: result.href, waitMs: 400 });
+  }
+
+  // Cache successful button/non-link clicks using the generated stable selector
+  if (result?.clicked && result?.generatedSelector) {
+    try {
+      const page = await getTargetTab(tabId);
+      saveCachedAction(page.url, "click", target || text, result, result.generatedSelector, "css");
+    } catch {}
+  }
+
+  return result;
 };
 
 

@@ -705,7 +705,9 @@
   // Wait for background to write the final response — event-driven, no interval race
   function waitForPendingResponse() {
     const k = storageKeys();
+    const progressKey = `_chat_tool_progress_${myTabId}`;
     let handled = false;
+    const liveToolBadges = new Map(); // toolName → badge el, for live updates
 
     function handleResponse(resp) {
       if (handled) return;
@@ -713,6 +715,7 @@
       chrome.storage.onChanged.removeListener(storageListener);
       clearTimeout(timeoutId);
       removeRestoreIndicator();
+      liveToolBadges.clear();
 
       if (resp.error) {
         addMessage('error', resp.error);
@@ -730,7 +733,28 @@
       setProcessingUI(false);
     }
 
+    function updateLiveProgress(prog) {
+      if (!prog || handled) return;
+      const ri = shadow.querySelector('#__restore-indicator span');
+      const toolLabel = prog.name.replace(/_/g, ' ');
+      if (prog.type === 'chat_tool_start') {
+        if (ri) ri.textContent = `Running ${toolLabel}…`;
+        if (!liveToolBadges.has(prog.name)) {
+          addToolBadge(prog.name, 'running');
+          liveToolBadges.set(prog.name, true);
+        }
+      } else if (prog.type === 'chat_tool_done') {
+        if (ri) ri.textContent = `Done: ${toolLabel}…`;
+        updateToolBadge(prog.name);
+      }
+    }
+
     function storageListener(changes) {
+      // Live tool progress
+      if (changes[progressKey]?.newValue) {
+        updateLiveProgress(changes[progressKey].newValue);
+      }
+      // Final response
       if (!changes[k.pending]) return;
       const resp = changes[k.pending].newValue;
       if (!resp) return;
@@ -739,9 +763,10 @@
     }
     chrome.storage.onChanged.addListener(storageListener);
 
-    // Immediate check — response may already be written before listener registered
-    chrome.storage.local.get([k.pending], (data) => {
+    // Immediate checks — both may already be written before listener registered
+    chrome.storage.local.get([k.pending, progressKey], (data) => {
       if (chrome.runtime.lastError) return;
+      if (data[progressKey]) updateLiveProgress(data[progressKey]);
       if (data[k.pending]) {
         chrome.storage.local.remove(k.pending);
         handleResponse(data[k.pending]);
