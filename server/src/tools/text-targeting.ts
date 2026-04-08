@@ -19,7 +19,7 @@ export function registerTextTargetingTools(server: McpServer, bridge: WebSocketB
 
   server.tool(
     "browser_click_by_text",
-    "Click an element by its visible text label — the highest-leverage targeting method for SPAs where CSS selectors are unstable (MUI JSS class names, React-generated IDs, etc.). Returns the clicked element's tagName and full text so you can confirm the right element was hit.",
+    "Click an element by its visible text label. Uses XPath-style text matching — works on React/MUI SPAs where CSS class names are dynamic. This is called automatically by browser_act (step 3 fallback). Prefer browser_act for automatic cache+XPath+text fallback chain. Use this directly only when you know the exact visible text.",
     {
       text: z.string().describe("Visible text to search for (button label, link text, etc.)"),
       exact: z.boolean().optional().default(false).describe("If true, text must match exactly. If false (default), substring match is used."),
@@ -38,7 +38,7 @@ export function registerTextTargetingTools(server: McpServer, bridge: WebSocketB
 
   server.tool(
     "browser_type_by_label",
-    "Type text into a form field by its label, placeholder, or aria-label — works on MUI/JSS-rendered pages where label linkage via 'for' attribute may be indirect. Falls back through: label[for] → nested input → placeholder → aria-label.",
+    "Type into a form field by its label, placeholder, or aria-label. Works on MUI/JSS pages. Called automatically by browser_act (step 3 fallback). Prefer browser_act for the full cache+XPath+label fallback chain. Use this directly only when you know the exact label text.",
     {
       label: z.string().describe("Label text, placeholder text, or aria-label of the input field"),
       text: z.string().describe("Text to type into the field"),

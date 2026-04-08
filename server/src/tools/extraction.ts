@@ -1,7 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { WebSocketBridge } from "../ws-bridge.js";
+import type { PageContent } from "../types.js";
 import { jsonResult } from "./helpers.js";
+import { selectorCache } from "../selector-cache.js";
 
 export function registerExtractionTools(server: McpServer, bridge: WebSocketBridge) {
   server.tool(
@@ -12,7 +14,26 @@ export function registerExtractionTools(server: McpServer, bridge: WebSocketBrid
       tabId: z.number().optional().describe("Tab ID. If omitted, uses active tab."),
     },
     async ({ scope, tabId }) => {
-      const result = await bridge.sendCommand("inspect_page", { scope, tabId });
+      const result = await bridge.sendCommand("inspect_page", { scope, tabId }) as {
+        url?: string; forms?: Array<{ label?: string; elements?: Array<{ tag?: string; label?: string; text?: string; selector?: string; actionHint?: string }> }>; topLevelElements?: Array<{ tag?: string; label?: string; text?: string; selector?: string; actionHint?: string }>;
+      };
+
+      // Auto-cache all discovered elements (fire-and-forget — does not block inspect response)
+      bridge.sendCommand("read_page", { tabId, format: "text" }).then((pageInfo) => {
+        const url = (pageInfo as PageContent).url;
+        const allElements = [
+          ...(result.topLevelElements ?? []),
+          ...(result.forms ?? []).flatMap(f => f.elements ?? []),
+        ];
+        for (const el of allElements) {
+          if (!el.selector) continue;
+          const humanLabel = el.label?.trim() || el.text?.trim();
+          if (!humanLabel) continue;
+          const action = (el.actionHint ?? "").startsWith("type") ? "type" : "click";
+          selectorCache.save(url, action, humanLabel, el.selector, "css");
+        }
+      }).catch(() => {});
+
       return jsonResult(result);
     }
   );

@@ -479,7 +479,18 @@ handlers.click = async ({ selector, tabId, waitForSelector, waitForSelectorTimeo
             const rr = document.createElement("div"); rr.className = "__bmcp-ripple --ring";
             rr.style.left = tx + "px"; rr.style.top = ty + "px"; document.body.appendChild(rr);
 
-            el.click();
+            // Fire full pointer event sequence — required for React synthetic events
+            const evOpts = { bubbles: true, cancelable: true, view: window, clientX: tx, clientY: ty };
+            el.dispatchEvent(new MouseEvent("pointerover", evOpts));
+            el.dispatchEvent(new MouseEvent("mouseover", evOpts));
+            el.dispatchEvent(new MouseEvent("pointermove", evOpts));
+            el.dispatchEvent(new MouseEvent("mousemove", evOpts));
+            el.dispatchEvent(new MouseEvent("pointerdown", evOpts));
+            el.dispatchEvent(new MouseEvent("mousedown", evOpts));
+            el.dispatchEvent(new MouseEvent("pointerup", evOpts));
+            el.dispatchEvent(new MouseEvent("mouseup", evOpts));
+            el.dispatchEvent(new MouseEvent("click", evOpts));
+            el.click(); // native fallback for non-React elements
 
             // Badge → "✓ Done" flash
             badge.classList.add("--done");
@@ -1186,6 +1197,15 @@ handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId 
             r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
             const rr = document.createElement("div"); rr.className = "__bmcp-ripple --ring";
             rr.style.left = tx + "px"; rr.style.top = ty + "px"; document.body.appendChild(rr);
+            // Full pointer/mouse event sequence for React synthetic events
+            const evOpts = { bubbles: true, cancelable: true, view: window, clientX: tx, clientY: ty };
+            el.dispatchEvent(new MouseEvent("pointerover", evOpts));
+            el.dispatchEvent(new MouseEvent("mouseover", evOpts));
+            el.dispatchEvent(new MouseEvent("pointerdown", evOpts));
+            el.dispatchEvent(new MouseEvent("mousedown", evOpts));
+            el.dispatchEvent(new MouseEvent("pointerup", evOpts));
+            el.dispatchEvent(new MouseEvent("mouseup", evOpts));
+            el.dispatchEvent(new MouseEvent("click", evOpts));
             el.click();
             badge.classList.add("--done");
             badge.innerHTML = '<span style="font-size:13px">✓</span><span>Done</span>';
@@ -1362,6 +1382,14 @@ handlers.find_by_xpath = async ({ xpath, action = "click", text, tabId }) => {
             r2.style.left = tx + "px"; r2.style.top = ty + "px"; document.body.appendChild(r2);
             setTimeout(() => {
               c.classList.remove("--press");
+              const evOpts = { bubbles: true, cancelable: true, view: window, clientX: tx, clientY: ty };
+              el.dispatchEvent(new MouseEvent("pointerover", evOpts));
+              el.dispatchEvent(new MouseEvent("mouseover", evOpts));
+              el.dispatchEvent(new MouseEvent("pointerdown", evOpts));
+              el.dispatchEvent(new MouseEvent("mousedown", evOpts));
+              el.dispatchEvent(new MouseEvent("pointerup", evOpts));
+              el.dispatchEvent(new MouseEvent("mouseup", evOpts));
+              el.dispatchEvent(new MouseEvent("click", evOpts));
               el.click();
               resolve({ action: "clicked", tagName: el.tagName, text: el.textContent?.trim().slice(0, 200) });
             }, 110);

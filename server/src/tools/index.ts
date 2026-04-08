@@ -10,9 +10,12 @@ import { registerMonitoringTools } from "./monitoring.js";
 import { registerWindowTools } from "./window.js";
 import { registerContentTools } from "./content.js";
 import { registerTextTargetingTools } from "./text-targeting.js";
+import { registerCacheTools } from "./cache.js";
+import { registerActTool } from "./act.js";
 
 
 export function registerAllTools(server: McpServer, bridge: WebSocketBridge) {
+  registerActTool(server, bridge);  // registered first so it appears prominently
   registerCoreTools(server, bridge);
   registerNavigationTools(server, bridge);
   registerUtilityTools(server, bridge);
@@ -22,4 +25,5 @@ export function registerAllTools(server: McpServer, bridge: WebSocketBridge) {
   registerWindowTools(server, bridge);
   registerContentTools(server, bridge);
   registerTextTargetingTools(server, bridge);
+  registerCacheTools(server, bridge);
 }
