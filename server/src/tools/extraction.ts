@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { WebSocketBridge } from "../ws-bridge.js";
 import type { PageContent } from "../types.js";
 import { jsonResult } from "./helpers.js";
-import { selectorCache } from "../selector-cache.js";
+import { saveCachedAction } from "./mcp-cache.js";
 
 export function registerExtractionTools(server: McpServer, bridge: WebSocketBridge) {
   server.tool(
@@ -18,7 +18,7 @@ export function registerExtractionTools(server: McpServer, bridge: WebSocketBrid
         url?: string; forms?: Array<{ label?: string; elements?: Array<{ tag?: string; label?: string; text?: string; selector?: string; actionHint?: string }> }>; topLevelElements?: Array<{ tag?: string; label?: string; text?: string; selector?: string; actionHint?: string }>;
       };
 
-      // Auto-cache all discovered elements (fire-and-forget — does not block inspect response)
+      // Auto-cache all discovered elements
       bridge.sendCommand("read_page", { tabId, format: "text" }).then((pageInfo) => {
         const url = (pageInfo as PageContent).url;
         const allElements = [
@@ -30,7 +30,7 @@ export function registerExtractionTools(server: McpServer, bridge: WebSocketBrid
           const humanLabel = el.label?.trim() || el.text?.trim();
           if (!humanLabel) continue;
           const action = (el.actionHint ?? "").startsWith("type") ? "type" : "click";
-          selectorCache.save(url, action, humanLabel, el.selector, "css");
+          saveCachedAction(url, action, humanLabel, { discovered: true }, el.selector, "css").catch(() => {});
         }
       }).catch(() => {});
 

@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 
+import 'dotenv/config';
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketBridge } from "./ws-bridge.js";
 import { createMcpServer } from "./mcp-server.js";
+import { initMongoDB, closeMongoDB } from "./memory.js";
 
 const WS_PORT = parseInt(process.env.BROWSER_MCP_WS_PORT ?? "12800", 10);
 
 async function main() {
+  try {
+    await initMongoDB();
+  } catch (err) {
+    console.error('[BrowserMCP] MongoDB connection failed, continuing without it:', err);
+  }
+
   const bridge = new WebSocketBridge(WS_PORT);
 
   try {
@@ -34,6 +42,7 @@ async function main() {
     process.stderr.write("[BrowserMCP] Shutting down...\n");
     await server.close();
     await bridge.close();
+    await closeMongoDB();
     process.exit(0);
   };
 

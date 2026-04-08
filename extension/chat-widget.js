@@ -166,6 +166,7 @@
 
     /* Message bubbles */
     .msg-wrap { display: flex; flex-direction: column; max-width: 88%; animation: msg-in 0.25s ease-out; }
+    .no-anim { animation: none !important; }
     .msg-wrap.user { align-self: flex-end; align-items: flex-end; }
     .msg-wrap.ai { align-self: flex-start; align-items: flex-start; }
 
@@ -245,6 +246,21 @@
     }
     .tool-badge .check { color: #10B981; font-weight: 700; }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Restore indicator (shown after navigation while polling for response) */
+    .restore-indicator {
+      align-self: center; text-align: center;
+      font-size: 11px; color: #4B5563;
+      padding: 6px 14px; border-radius: 10px;
+      background: rgba(99,102,241,0.06);
+      border: 1px solid rgba(99,102,241,0.12);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .restore-indicator .ri-spin {
+      width: 10px; height: 10px; border: 1.5px solid rgba(129,140,248,0.3);
+      border-top-color: #818CF8; border-radius: 50%;
+      animation: spin 0.8s linear infinite; flex-shrink: 0;
+    }
 
     /* Thinking indicator */
     .thinking {
@@ -608,11 +624,13 @@
   let isOpen = false;
   let settingsOpen = false;
   let isProcessing = false;
+  let ownRequest = false; // true only when THIS script instance started the request
   let abortController = null;
   let conversationHistory = [];
   let settings = { provider: 'openai', model: 'gpt-4o', openaiKey: '', claudeKey: '' };
   let isRecording = false;
   let recognition = null;
+  let myTabId = null; // set on init via background — makes storage keys tab-specific
 
   const MODELS = {
     openai: [
@@ -630,13 +648,25 @@
     ],
   };
 
-  // ── Chat persistence (survives navigation) ───────────────────
+  // ── Chat persistence (tab-scoped, survives same-tab navigation) ─
+  // Keys are keyed to myTabId so different tabs never share state.
+  function storageKeys() {
+    const id = myTabId || 'unknown';
+    return {
+      history:    `_chat_history_${id}`,
+      open:       `_chat_open_${id}`,
+      processing: `_chat_processing_${id}`,
+      pending:    `_chat_pending_${id}`,
+    };
+  }
+
   function saveChat() {
     try {
+      const k = storageKeys();
       chrome.storage.local.set({
-        _chatHistory: conversationHistory,
-        _chatOpen: isOpen,
-        _chatProcessing: isProcessing,
+        [k.history]:    conversationHistory,
+        [k.open]:       isOpen,
+        [k.processing]: isProcessing,
       });
     } catch {}
   }
@@ -644,29 +674,88 @@
   function restoreChat() {
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.get(['_chatHistory', '_chatOpen', '_chatProcessing'], (data) => {
+        const k = storageKeys();
+        chrome.storage.local.get([k.history, k.open, k.processing], (data) => {
           if (chrome.runtime.lastError) { resolve(); return; }
-          if (data._chatHistory?.length) {
-            conversationHistory = data._chatHistory;
+          if (data[k.history]?.length) {
+            conversationHistory = data[k.history];
             welcomeEl.style.display = 'none';
             for (const msg of conversationHistory) {
-              addMessage(msg.role, msg.content);
+              addMessage(msg.role, msg.content, { animate: false });
             }
           }
-          if (data._chatOpen) {
+          if (data[k.open]) {
             isOpen = true;
             bubble.classList.add('hidden');
             panel.classList.add('open');
           }
-          // If we were processing when the page navigated, show thinking + stop button
-          if (data._chatProcessing) {
-            addThinking();
+          // If background was processing when page navigated, wait for response.
+          // Use a separate restore-indicator (NOT #__thinking) to avoid conflicts.
+          if (data[k.processing]) {
+            addRestoreIndicator();
             setProcessingUI(true);
+            waitForPendingResponse();
           }
           resolve();
         });
       } catch { resolve(); }
     });
+  }
+
+  // Wait for background to write the final response — event-driven, no interval race
+  function waitForPendingResponse() {
+    const k = storageKeys();
+    let handled = false;
+
+    function handleResponse(resp) {
+      if (handled) return;
+      handled = true;
+      chrome.storage.onChanged.removeListener(storageListener);
+      clearTimeout(timeoutId);
+      removeRestoreIndicator();
+
+      if (resp.error) {
+        addMessage('error', resp.error);
+      } else {
+        if (resp.toolsUsed?.length) {
+          for (const tool of resp.toolsUsed) {
+            addToolBadge(tool.name, 'done');
+          }
+        }
+        addMessage('assistant', resp.text);
+        conversationHistory.push({ role: 'assistant', content: resp.text });
+        if (resp.canContinue) addContinueButton();
+      }
+      // setProcessingUI(false) must come before saveChat so _chatProcessing saves as false
+      setProcessingUI(false);
+    }
+
+    function storageListener(changes) {
+      if (!changes[k.pending]) return;
+      const resp = changes[k.pending].newValue;
+      if (!resp) return;
+      chrome.storage.local.remove(k.pending);
+      handleResponse(resp);
+    }
+    chrome.storage.onChanged.addListener(storageListener);
+
+    // Immediate check — response may already be written before listener registered
+    chrome.storage.local.get([k.pending], (data) => {
+      if (chrome.runtime.lastError) return;
+      if (data[k.pending]) {
+        chrome.storage.local.remove(k.pending);
+        handleResponse(data[k.pending]);
+      }
+    });
+
+    const timeoutId = setTimeout(() => {
+      if (handled) return;
+      handled = true;
+      chrome.storage.onChanged.removeListener(storageListener);
+      removeRestoreIndicator();
+      addMessage('system', 'Request timed out after navigation.');
+      setProcessingUI(false);
+    }, 120000);
   }
 
   // ── Voice recognition setup ─────────────────────────────────
@@ -799,13 +888,14 @@
   }
 
   // ── Message helpers ──────────────────────────────────────────
-  function addMessage(role, content) {
+  function addMessage(role, content, { animate = true } = {}) {
     welcomeEl.style.display = 'none';
     const time = formatTime();
+    const animClass = animate ? '' : ' no-anim';
 
     if (role === 'user') {
       const wrap = document.createElement('div');
-      wrap.className = 'msg-wrap user';
+      wrap.className = 'msg-wrap user' + animClass;
       const div = document.createElement('div');
       div.className = 'msg msg-user';
       div.textContent = content;
@@ -817,7 +907,7 @@
       messagesEl.appendChild(wrap);
     } else if (role === 'assistant') {
       const wrap = document.createElement('div');
-      wrap.className = 'msg-wrap ai';
+      wrap.className = 'msg-wrap ai' + animClass;
       const div = document.createElement('div');
       div.className = 'msg msg-ai';
       div.innerHTML = renderMarkdown(content);
@@ -847,12 +937,12 @@
       }
     } else if (role === 'error') {
       const div = document.createElement('div');
-      div.className = 'msg-error';
+      div.className = 'msg-error' + animClass;
       div.textContent = content;
       messagesEl.appendChild(div);
     } else if (role === 'system') {
       const div = document.createElement('div');
-      div.className = 'msg-system';
+      div.className = 'msg-system' + animClass;
       div.textContent = content;
       messagesEl.appendChild(div);
     }
@@ -861,6 +951,8 @@
   }
 
   function addThinking() {
+    // Idempotent — never create more than one thinking indicator
+    if (shadow.querySelector('#__thinking')) return;
     welcomeEl.style.display = 'none';
     const div = document.createElement('div');
     div.className = 'thinking';
@@ -872,8 +964,23 @@
   }
 
   function removeThinking() {
-    const el = shadow.querySelector('#__thinking');
-    if (el) el.remove();
+    // Remove all thinking indicators (guards against any duplicate that slipped through)
+    shadow.querySelectorAll('#__thinking').forEach(el => el.remove());
+  }
+
+  function addRestoreIndicator() {
+    if (shadow.querySelector('#__restore-indicator')) return;
+    welcomeEl.style.display = 'none';
+    const div = document.createElement('div');
+    div.className = 'restore-indicator';
+    div.id = '__restore-indicator';
+    div.innerHTML = '<div class="ri-spin"></div><span>Resuming after navigation\u2026</span>';
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function removeRestoreIndicator() {
+    shadow.querySelectorAll('#__restore-indicator').forEach(el => el.remove());
   }
 
   function addToolBadge(toolName, status = 'running') {
@@ -890,11 +997,15 @@
     return div;
   }
 
-  function updateToolBadge(toolName) {
+  function updateToolBadge(toolName, fromCache) {
     const badges = shadow.querySelectorAll('.tool-badge');
     badges.forEach(b => {
       if (b.dataset.tool === toolName && b.querySelector('.spinner')) {
-        b.innerHTML = `<span class="check">\u2713</span> Used <strong>${toolName}</strong>`;
+        if (fromCache) {
+          b.innerHTML = `<span class="check">⚡</span> Used <strong>${toolName}</strong> (cached)`;
+        } else {
+          b.innerHTML = `<span class="check">\u2713</span> Used <strong>${toolName}</strong>`;
+        }
       }
     });
   }
@@ -937,6 +1048,7 @@
       abortController.abort();
       abortController = null;
     }
+    ownRequest = false;
     removeThinking();
     addMessage('system', 'Generation stopped');
     setProcessingUI(false);
@@ -952,6 +1064,7 @@
       recognition.stop();
     }
 
+    ownRequest = true;
     setProcessingUI(true);
     chatInput.value = '';
     autoResize();
@@ -969,28 +1082,53 @@
       const response = await new Promise((resolve, reject) => {
         const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
         if (abortController.signal.aborted) { onAbort(); return; }
-        abortController.signal.addEventListener('abort', onAbort);
+        
+        let abortHandler = null;
+        let retries = 0;
+        const maxRetries = 5;
 
-        chrome.runtime.sendMessage({
-          type: 'chat_send',
-          messages: conversationHistory,
-          provider: settings.provider,
-          model: settings.model,
-        }, (resp) => {
-          abortController.signal.removeEventListener('abort', onAbort);
-          if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message));
-            return;
+        const trySend = () => {
+          if (abortController.signal.aborted) { 
+            reject(new DOMException('Aborted', 'AbortError')); 
+            return; 
           }
-          if (resp?.error) {
-            reject(new Error(resp.error));
-            return;
-          }
-          resolve(resp);
-        });
+
+          chrome.runtime.sendMessage({
+            type: 'chat_send',
+            messages: conversationHistory,
+            provider: settings.provider,
+            model: settings.model,
+            requestId: Date.now() + Math.random(),
+          }, (resp) => {
+            if (!abortController) return;
+            
+            if (chrome.runtime.lastError) {
+              const errMsg = chrome.runtime.lastError.message || '';
+              if ((errMsg.includes('Extension context invalidated') || errMsg.includes('Could not establish connection')) && retries < maxRetries) {
+                retries++;
+                setTimeout(trySend, 800);
+                return;
+              }
+              reject(new Error(chrome.runtime.lastError.message));
+              return;
+            }
+            if (resp?.error) {
+              reject(new Error(resp.error));
+              return;
+            }
+            resolve(resp);
+          });
+        };
+
+        abortHandler = () => reject(new DOMException('Aborted', 'AbortError'));
+        abortController.signal.addEventListener('abort', abortHandler);
+        trySend();
       });
 
       removeThinking();
+
+      // Reset tool tracking for new message
+      toolCount = 0;
 
       if (response.toolsUsed?.length) {
         for (const tool of response.toolsUsed) {
@@ -1017,19 +1155,28 @@
     }
 
     abortController = null;
+    ownRequest = false;
     setProcessingUI(false);
     chatInput.focus();
   }
 
   // ── Listen for background progress messages ──────────────────
+  let toolCount = 0;
+  let hasThinking = false;
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'chat_tool_start') {
-      removeThinking();
+      if (hasThinking) {
+        removeThinking();
+      }
       addToolBadge(msg.tool, 'running');
+      toolCount++;
     }
     if (msg.type === 'chat_tool_done') {
-      updateToolBadge(msg.tool);
-      addThinking();
+      updateToolBadge(msg.tool, msg.fromCache);
+      toolCount--;
+      if (toolCount <= 0) {
+        toolCount = 0;
+      }
     }
   });
 
@@ -1194,5 +1341,12 @@
   // ── Init ─────────────────────────────────────────────────────
   populateModels();
   loadSettings();
-  restoreChat();
+  // Get our tab ID first — all storage keys are scoped to this tab ID so
+  // different tabs (or accidentally opened new tabs) never share processing state.
+  chrome.runtime.sendMessage({ type: 'getMyTabId' }, (resp) => {
+    if (!chrome.runtime.lastError && resp?.tabId) {
+      myTabId = resp.tabId;
+    }
+    restoreChat();
+  });
 })();

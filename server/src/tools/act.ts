@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { WebSocketBridge } from "../ws-bridge.js";
 import type { PageContent } from "../types.js";
 import { textResult } from "./helpers.js";
-import { selectorCache } from "../selector-cache.js";
+import { getCachedAction, saveCachedAction } from "./mcp-cache.js";
 
 /**
  * Generate XPath expressions to try for a given target text.
@@ -59,37 +59,36 @@ Examples:
       const errors: string[] = [];
       const wait = () => waitMs ? new Promise(r => setTimeout(r, waitMs)) : Promise.resolve();
 
-      // ── 1. Try cached selector (XPath preferred over CSS) ────────────────
+      // ── 1. Try cached action from new cache system ────────────────
       try {
         const pageInfo = await bridge.sendCommand("read_page", { tabId, format: "text" }) as PageContent;
-        const cached = selectorCache.find(pageInfo.url, action, target)
-          .sort((a, b) => (b.selectorType === "xpath" ? 1 : 0) - (a.selectorType === "xpath" ? 1 : 0)); // xpath first
-
-        for (const entry of cached) {
+        const cached = await getCachedAction(pageInfo.url, action, target);
+        
+        if (cached && cached.selector) {
           try {
-            const command = entry.selectorType === "xpath" ? "find_by_xpath" : "click";
+            const command = cached.selectorType === "xpath" ? "find_by_xpath" : "click";
             if (action === "click") {
-              const r = entry.selectorType === "xpath"
-                ? await bridge.sendCommand("find_by_xpath", { xpath: entry.selector, action: "click", tabId }) as { action?: string }
-                : await bridge.sendCommand("click", { selector: entry.selector, tabId }) as { clicked?: boolean };
-              const ok = entry.selectorType === "xpath" ? (r as any).action === "clicked" : (r as any).clicked;
+              const r = cached.selectorType === "xpath"
+                ? await bridge.sendCommand("find_by_xpath", { xpath: cached.selector, action: "click", tabId }) as { action?: string }
+                : await bridge.sendCommand("click", { selector: cached.selector, tabId }) as { clicked?: boolean };
+              const ok = cached.selectorType === "xpath" ? (r as any).action === "clicked" : (r as any).clicked;
               if (ok) {
                 await wait();
-                selectorCache.save(pageInfo.url, "click", target, entry.selector, entry.selectorType);
-                return textResult(`✓ Clicked "${target}" [⚡ cached ${entry.selectorType}: ${entry.selector}]`);
+                await saveCachedAction(pageInfo.url, "click", target, { clicked: true }, cached.selector, cached.selectorType);
+                return textResult(`✓ Clicked "${target}" [⚡ cached ${cached.selectorType}: ${cached.selector}]`);
               }
             } else {
-              if (entry.selectorType === "xpath") {
-                await bridge.sendCommand("find_by_xpath", { xpath: entry.selector, action: "type", text: value ?? "", tabId });
+              if (cached.selectorType === "xpath") {
+                await bridge.sendCommand("find_by_xpath", { xpath: cached.selector, action: "type", text: value ?? "", tabId });
               } else {
-                await bridge.sendCommand("type", { selector: entry.selector, text: value ?? "", tabId });
+                await bridge.sendCommand("type", { selector: cached.selector, text: value ?? "", tabId });
               }
               await wait();
-              selectorCache.save(pageInfo.url, "type", target, entry.selector, entry.selectorType);
-              return textResult(`✓ Typed into "${target}" [⚡ cached ${entry.selectorType}: ${entry.selector}]`);
+              await saveCachedAction(pageInfo.url, "type", target, { typed: true }, cached.selector, cached.selectorType);
+              return textResult(`✓ Typed into "${target}" [⚡ cached ${cached.selectorType}: ${cached.selector}]`);
             }
           } catch (e) {
-            errors.push(`cache(${entry.selector}): ${(e as Error).message}`);
+            errors.push(`cache(${cached.selector}): ${(e as Error).message}`);
           }
         }
       } catch { /* no cache, fall through */ }
@@ -103,7 +102,7 @@ Examples:
               await wait();
               // Cache the working xpath for next time
               bridge.sendCommand("read_page", { tabId, format: "text" }).then(p => {
-                selectorCache.save((p as PageContent).url, "click", target, xpath, "xpath");
+                saveCachedAction((p as PageContent).url, "click", target, { clicked: true }, xpath, "xpath").catch(() => {});
               }).catch(() => {});
               return textResult(`✓ Clicked "${target}" [xpath: ${xpath}]`);
             }
@@ -114,7 +113,7 @@ Examples:
             await bridge.sendCommand("find_by_xpath", { xpath: xp, action: "type", text: value ?? "", tabId });
             await wait();
             bridge.sendCommand("read_page", { tabId, format: "text" }).then(p => {
-              selectorCache.save((p as PageContent).url, "type", target, xp, "xpath");
+              saveCachedAction((p as PageContent).url, "type", target, { typed: true }, xp, "xpath").catch(() => {});
             }).catch(() => {});
             return textResult(`✓ Typed into "${target}" [xpath: ${xp}]`);
           }
@@ -170,7 +169,7 @@ Examples:
             if (r?.action === "clicked") {
               await wait();
               bridge.sendCommand("read_page", { tabId, format: "text" }).then(p => {
-                selectorCache.save((p as PageContent).url, "click", target, xpath, "xpath");
+                saveCachedAction((p as PageContent).url, "click", target, { clicked: true }, xpath, "xpath").catch(() => {});
               }).catch(() => {});
               return textResult(`✓ Clicked "${target}" [get_elements scan → xpath: ${xpath}]`);
             }
@@ -178,7 +177,7 @@ Examples:
             await bridge.sendCommand("find_by_xpath", { xpath, action: "type", text: value ?? "", tabId });
             await wait();
             bridge.sendCommand("read_page", { tabId, format: "text" }).then(p => {
-              selectorCache.save((p as PageContent).url, "type", target, xpath, "xpath");
+              saveCachedAction((p as PageContent).url, "type", target, { typed: true }, xpath, "xpath").catch(() => {});
             }).catch(() => {});
             return textResult(`✓ Typed into "${target}" [get_elements scan → xpath: ${xpath}]`);
           }

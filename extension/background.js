@@ -5,14 +5,49 @@ const WS_URL = "ws://localhost:12800";
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 5000;
 const KEEPALIVE_INTERVAL_MS = 25000;
-const FAST_POLL_INTERVAL_MS = 1500; // fast reconnect polling when disconnected
+const FAST_POLL_INTERVAL_MS = 1500;
 
 let ws = null;
 let connected = false;
-let connecting = false; // guard against concurrent connect() calls
+let connecting = false;
 let reconnectDelay = RECONNECT_BASE_MS;
 let keepaliveTimer = null;
 let fastPollTimer = null;
+
+// ============================================================
+// Action Cache (LRU in-memory)
+// ============================================================
+
+const actionCache = new Map();
+const ACTION_CACHE_MAX = 500;
+const ACTION_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+function getActionCacheKey(url, action, target) {
+  return `${url}:${action}:${target}`;
+}
+
+function getCachedAction(url, action, target) {
+  const key = getActionCacheKey(url, action, target);
+  const entry = actionCache.get(key);
+  if (entry && Date.now() - entry.timestamp < ACTION_CACHE_TTL) {
+    return entry;
+  }
+  if (entry) actionCache.delete(key);
+  return null;
+}
+
+function saveCachedAction(url, action, target, result, selector, selectorType) {
+  const key = getActionCacheKey(url, action, target);
+  if (actionCache.size >= ACTION_CACHE_MAX) {
+    const oldestKey = actionCache.keys().next().value;
+    actionCache.delete(oldestKey);
+  }
+  actionCache.set(key, {
+    url, action, target, result, selector, selectorType,
+    timestamp: Date.now(),
+    successCount: (actionCache.get(key)?.successCount || 0) + 1
+  });
+}
 
 // ============================================================
 // WebSocket Connection
@@ -139,6 +174,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   // ── Chat Widget handlers ──
+  if (msg.type === "getMyTabId") {
+    sendResponse({ tabId: sender.tab?.id });
+    return true;
+  }
   if (msg.type === "chat_get_settings") {
     chrome.storage.local.get(["chatSettings"], (data) => sendResponse(data.chatSettings || {}));
     return true;
@@ -148,9 +187,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === "chat_send") {
-    processChatMessage(msg, sender.tab?.id).then(sendResponse).catch(e => sendResponse({ error: e.message || String(e) }));
+    // Use the exact tab that sent the message — reliable, avoids getTargetTab race
+    const tabId = sender.tab?.id;
+    const pendingKey  = `_chat_pending_${tabId}`;
+    const processingKey = `_chat_processing_${tabId}`;
+    // Mark processing started and clear any stale pending response for this tab
+    chrome.storage.local.set({ [processingKey]: true });
+    chrome.storage.local.remove(pendingKey);
+    processChatMessage(msg, tabId)
+      .then(resp => {
+        // Write pending response and clear processing flag atomically
+        chrome.storage.local.set({ [pendingKey]: resp, [processingKey]: false });
+        sendResponse(resp);
+      })
+      .catch(e => {
+        const errResp = { error: e.message || String(e) };
+        chrome.storage.local.set({ [pendingKey]: errResp, [processingKey]: false });
+        sendResponse(errResp);
+      });
     return true;
   }
+
 });
 
 // ============================================================
@@ -165,17 +222,17 @@ const CHAT_TOOLS = [
   },
   {
     name: "click",
-    description: "Click an element on the page. Use a CSS selector, aria-label, or visible button/link text. Prefer text content for React/dynamic sites.",
-    parameters: { type: "object", properties: { selector: { type: "string", description: "CSS selector, aria-label value, or visible text of the element to click" } }, required: ["selector"] },
+    description: "Click an element on the page. Use a CSS selector, or specify target (button text/label) for smart matching. Prefer text-based targeting for dynamic sites.",
+    parameters: { type: "object", properties: { selector: { type: "string", description: "CSS selector for the element" }, target: { type: "string", description: "Human-readable target name for caching (e.g., 'Login button', 'Submit')" } }, required: ["selector"] },
   },
   {
     name: "type",
     description: "Type text into an input field or textarea on the page.",
-    parameters: { type: "object", properties: { selector: { type: "string", description: "CSS selector of the input/textarea" }, text: { type: "string", description: "Text to type" } }, required: ["selector", "text"] },
+    parameters: { type: "object", properties: { selector: { type: "string", description: "CSS selector of the input/textarea" }, text: { type: "string", description: "Text to type" }, target: { type: "string", description: "Human-readable target name for caching (e.g., 'Email', 'Password')" } }, required: ["selector", "text"] },
   },
   {
     name: "navigate",
-    description: "Navigate the browser to a URL. Opens in a new tab.",
+    description: "Navigate the browser to a URL. Opens in the current tab (not a new tab).",
     parameters: { type: "object", properties: { url: { type: "string", description: "The URL to navigate to" } }, required: ["url"] },
   },
   {
@@ -185,7 +242,7 @@ const CHAT_TOOLS = [
   },
   {
     name: "inspect_page",
-    description: "Get a map of all interactive elements on the page (buttons, inputs, links, forms). Use this to understand what actions are available.",
+    description: "Get a map of all interactive elements on the page (buttons, inputs, links, forms). Use this to discover what actions are available.",
     parameters: { type: "object", properties: {} },
   },
   {
@@ -220,8 +277,8 @@ const CHAT_TOOLS = [
   },
   {
     name: "click_by_text",
-    description: "Click an element by its visible text content. Best for dynamic sites where CSS selectors are unreliable.",
-    parameters: { type: "object", properties: { text: { type: "string", description: "Visible text of the element" }, elementType: { type: "string", enum: ["button", "link", "*"], description: "Type filter (default *)" } }, required: ["text"] },
+    description: "Click a clickable element (button, link, tab, menu item) by its visible text content. Best for dynamic sites where CSS selectors are unreliable.",
+    parameters: { type: "object", properties: { text: { type: "string", description: "Visible text of the element" }, elementType: { type: "string", enum: ["button", "link", "*"], description: "Type filter (default *)" }, target: { type: "string", description: "Human-readable target name for caching" } }, required: ["text"] },
   },
   {
     name: "fill_form",
@@ -252,7 +309,7 @@ const CHAT_TOOLS = [
 async function executeChatTool(name, args, tabId) {
   switch (name) {
     case "read_page":      return await handlers.read_page({ tabId, format: args.format || "text" });
-    case "click":          return await handlers.click({ tabId, selector: args.selector });
+    case "click":          return await handlers.click({ tabId, selector: args.selector, target: args.target });
     case "type":           return await handlers.type({ tabId, selector: args.selector, text: args.text });
     case "navigate":       return await handlers.navigate({ tabId, url: args.url, waitMs: 2000 });
     case "scroll":         return await handlers.scroll({ tabId, direction: args.direction, pixels: args.pixels, selector: args.selector });
@@ -263,7 +320,7 @@ async function executeChatTool(name, args, tabId) {
     case "screenshot":     return await handlers.screenshot({ tabId });
     case "back":           return await handlers.back({ tabId });
     case "forward":        return await handlers.forward({ tabId });
-    case "click_by_text":  return await handlers.click_by_text({ tabId, text: args.text, elementType: args.elementType || "*" });
+    case "click_by_text":  return await handlers.click_by_text({ tabId, text: args.text, elementType: args.elementType || "*", target: args.target });
     case "fill_form":      return await handlers.fill_form({ tabId, fields: args.fields });
     default: throw new Error(`Unknown tool: ${name}`);
   }
@@ -354,9 +411,9 @@ async function chatWithOpenAI(apiKey, model, systemPrompt, history, tabId) {
         }
 
         const resultStr = truncateToolResult(result);
-        toolsUsed.push({ name: toolName, args });
+        toolsUsed.push({ name: toolName, args, fromCache: result?.fromCache });
 
-        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_done", tool: toolName }).catch(() => {});
+        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_done", tool: toolName, fromCache: result?.fromCache }).catch(() => {});
 
         openaiMessages.push({ role: "tool", tool_call_id: tc.id, content: resultStr });
       }
@@ -431,9 +488,9 @@ async function chatWithClaude(apiKey, model, systemPrompt, history, tabId) {
         }
 
         const resultStr = truncateToolResult(result);
-        toolsUsed.push({ name: toolName, args });
+        toolsUsed.push({ name: toolName, args, fromCache: result?.fromCache });
 
-        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_done", tool: toolName }).catch(() => {});
+        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_done", tool: toolName, fromCache: result?.fromCache }).catch(() => {});
 
         toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: resultStr });
       }
@@ -731,7 +788,33 @@ function findSmartElement(query, context = document) {
   return null;
 }
 
-handlers.click = async ({ selector, tabId, waitForSelector, waitForSelectorTimeout = 5000 }) => {
+handlers.click = async ({ selector, tabId, waitForSelector, waitForSelectorTimeout = 5000, target }) => {
+  // Try cache first
+  try {
+    const page = await getTargetTab(tabId);
+    const url = page.url;
+    const targetName = target || selector.replace(/^[#.\['"]/, "").replace(/[\]'"]/g, "").trim();
+    const cached = getCachedAction(url, "click", targetName);
+    if (cached) {
+      console.log('[Cache] Using cached selector:', cached.selector);
+      try {
+        const cachedResult = await injectAndRun(tabId, (sel, css, svg) => {
+          const el = document.querySelector(sel);
+          if (!el) throw new Error('Cached element not found');
+          if (el.tagName === 'A' && el.href && el.target && el.target !== '_self') {
+            return { clicked: false, isBlankTarget: true, href: el.href };
+          }
+          el.click();
+          return { clicked: true, tagName: el.tagName, text: (el.textContent || '').trim().slice(0, 200) };
+        }, [cached.selector, CURSOR_CSS, CURSOR_SVG]);
+        if (cachedResult?.isBlankTarget && cachedResult?.href) {
+          return await handlers.navigate({ tabId, url: cachedResult.href, waitMs: 2000 });
+        }
+        return { ...cachedResult, fromCache: true };
+      } catch {}
+    }
+  } catch {}
+
   const result = await injectAndRun(tabId, (sel, css, svg) => {
     // ── Element resolution with smart fallback ────────────────────────────────
     let el = null;
@@ -747,6 +830,11 @@ handlers.click = async ({ selector, tabId, waitForSelector, waitForSelectorTimeo
       }
     }
     if (!el) throw new Error(`Element not found: ${sel}`);
+
+    // Same-tab navigation for target="_blank" anchors
+    if (el.tagName === 'A' && el.href && el.target && el.target !== '_self') {
+      return { clicked: false, isBlankTarget: true, href: el.href };
+    }
 
     // ── Scroll into view ─────────────────────────────────────────────────────
     const r0 = el.getBoundingClientRect();
@@ -800,7 +888,7 @@ handlers.click = async ({ selector, tabId, waitForSelector, waitForSelectorTimeo
             const r1 = document.createElement("div"); r1.className = "__bmcp-ripple --fill";
             r1.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(r1);
             const rr = document.createElement("div"); rr.className = "__bmcp-ripple --ring";
-            rr.style.left = tx + "px"; rr.style.top = ty + "px"; document.body.appendChild(rr);
+            rr.style.left = tx + "px"; r1.style.top = ty + "px"; document.body.appendChild(rr);
 
             // Fire full pointer event sequence — required for React synthetic events
             const evOpts = { bubbles: true, cancelable: true, view: window, clientX: tx, clientY: ty };
@@ -828,6 +916,22 @@ handlers.click = async ({ selector, tabId, waitForSelector, waitForSelectorTimeo
       });
     });
   }, [selector, CURSOR_CSS, CURSOR_SVG]);
+
+  // Intercept target="_blank" — navigate current tab instead
+  if (result?.isBlankTarget && result?.href) {
+    return await handlers.navigate({ tabId, url: result.href, waitMs: 2000 });
+  }
+
+  // Save to cache on success
+  if (result?.clicked) {
+    try {
+      const page = await getTargetTab(tabId);
+      const url = page.url;
+      const targetName = target || selector.replace(/^[#.\['"]/, "").replace(/[\]'"]/g, "").trim();
+      saveCachedAction(url, "click", targetName, result, selector, "css");
+    } catch {}
+  }
+  
   if (waitForSelector) await handlers.wait_for({ selector: waitForSelector, timeout: waitForSelectorTimeout, tabId });
   return result;
 };
@@ -1461,11 +1565,37 @@ handlers.set_cookies = async ({ url, name, value, domain, path = "/", secure, ht
 
 // --- TEXT-BASED ELEMENT TARGETING ---
 
-handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId }) => {
+handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId, target }) => {
+  // Try cache first
+  try {
+    const page = await getTargetTab(tabId);
+    const url = page.url;
+    const targetName = target || text;
+    const cached = getCachedAction(url, "click", targetName);
+    if (cached) {
+      console.log('[Cache] Using cached selector for click_by_text:', cached.selector);
+      try {
+        const cachedResult = await injectAndRun(tabId, (sel) => {
+          const el = document.querySelector(sel);
+          if (!el) throw new Error('Cached element not found');
+          if (el.tagName === 'A' && el.href && el.target && el.target !== '_self') {
+            return { clicked: false, isBlankTarget: true, href: el.href };
+          }
+          el.click();
+          return { clicked: true, tagName: el.tagName, text: (el.textContent || '').trim().slice(0, 200) };
+        }, [cached.selector]);
+        if (cachedResult?.isBlankTarget && cachedResult?.href) {
+          return await handlers.navigate({ tabId, url: cachedResult.href, waitMs: 2000 });
+        }
+        return { ...cachedResult, fromCache: true };
+      } catch {}
+    }
+  } catch {}
+
   return await injectAndRun(tabId, (txt, elType, isExact, css, svg) => {
     const clickable = elType === "button"
       ? 'button,[role="button"],input[type="button"],input[type="submit"],a,[role="tab"],[role="menuitem"],[role="option"]'
-      : elType === "link" ? "a" : 'button,[role="button"],a,[role="tab"],[role="menuitem"],[role="option"],[onclick],[tabindex],*';
+      : elType === "link" ? "a" : 'button,[role="button"],a,[role="tab"],[role="menuitem"],[role="option"],[onclick],[tabindex],summary,label,select,details';
     const candidates = Array.from(document.querySelectorAll(clickable));
     const matches = candidates.filter(e => {
       const t = (e.textContent || "").trim();
@@ -1478,6 +1608,11 @@ handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId 
       if (bt === txt && ct !== txt) return best;
       return ct.length < bt.length ? cur : best;
     });
+
+    // Same-tab navigation for target="_blank" anchors
+    if (el.tagName === 'A' && el.href && el.target && el.target !== '_self') {
+      return { clicked: false, isBlankTarget: true, href: el.href };
+    }
 
     // Scroll into view
     const r0 = el.getBoundingClientRect();
@@ -1539,7 +1674,25 @@ handlers.click_by_text = async ({ text, elementType = "*", exact = false, tabId 
         }, 280);
       });
     });
-  }, [text, elementType, exact, CURSOR_CSS, CURSOR_SVG]);
+  }, [text, elementType, exact, CURSOR_CSS, CURSOR_SVG]).then(async result => {
+    // Intercept target="_blank" — navigate current tab instead
+    if (result?.isBlankTarget && result?.href) {
+      return await handlers.navigate({ tabId, url: result.href, waitMs: 2000 });
+    }
+    // Save to cache on success
+    if (result?.clicked) {
+      (async () => {
+        try {
+          const page = await getTargetTab(tabId);
+          const url = page.url;
+          // Generate a simple CSS selector based on tag and text
+          const sel = `button:contains("${text}")`;
+          saveCachedAction(url, "click", text, result, sel, "text");
+        } catch {}
+      })();
+    }
+    return result;
+  });
 };
 
 
