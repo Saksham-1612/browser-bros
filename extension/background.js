@@ -138,7 +138,321 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return true;
   }
+  // ── Chat Widget handlers ──
+  if (msg.type === "chat_get_settings") {
+    chrome.storage.local.get(["chatSettings"], (data) => sendResponse(data.chatSettings || {}));
+    return true;
+  }
+  if (msg.type === "chat_save_settings") {
+    chrome.storage.local.set({ chatSettings: msg.settings }, () => sendResponse({ ok: true }));
+    return true;
+  }
+  if (msg.type === "chat_send") {
+    processChatMessage(msg, sender.tab?.id).then(sendResponse).catch(e => sendResponse({ error: e.message || String(e) }));
+    return true;
+  }
 });
+
+// ============================================================
+// Chat AI Processing
+// ============================================================
+
+const CHAT_TOOLS = [
+  {
+    name: "read_page",
+    description: "Read the text content of the current browser page. Returns page title, URL, and text content.",
+    parameters: { type: "object", properties: { format: { type: "string", enum: ["text", "html"], description: "Output format — text (default) or html" } } },
+  },
+  {
+    name: "click",
+    description: "Click an element on the page. Use a CSS selector, aria-label, or visible button/link text. Prefer text content for React/dynamic sites.",
+    parameters: { type: "object", properties: { selector: { type: "string", description: "CSS selector, aria-label value, or visible text of the element to click" } }, required: ["selector"] },
+  },
+  {
+    name: "type",
+    description: "Type text into an input field or textarea on the page.",
+    parameters: { type: "object", properties: { selector: { type: "string", description: "CSS selector of the input/textarea" }, text: { type: "string", description: "Text to type" } }, required: ["selector", "text"] },
+  },
+  {
+    name: "navigate",
+    description: "Navigate the browser to a URL. Opens in a new tab.",
+    parameters: { type: "object", properties: { url: { type: "string", description: "The URL to navigate to" } }, required: ["url"] },
+  },
+  {
+    name: "scroll",
+    description: "Scroll the page in a direction or to a specific element.",
+    parameters: { type: "object", properties: { direction: { type: "string", enum: ["up", "down", "left", "right"], description: "Scroll direction" }, pixels: { type: "number", description: "Pixels to scroll (default 500)" }, selector: { type: "string", description: "CSS selector to scroll to (overrides direction)" } } },
+  },
+  {
+    name: "inspect_page",
+    description: "Get a map of all interactive elements on the page (buttons, inputs, links, forms). Use this to understand what actions are available.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "get_links",
+    description: "Extract all links from the current page with their text and href.",
+    parameters: { type: "object", properties: { filter: { type: "string", description: "Optional text filter to narrow results" } } },
+  },
+  {
+    name: "get_elements",
+    description: "Query elements by CSS selector and return their attributes.",
+    parameters: { type: "object", properties: { selector: { type: "string", description: "CSS selector to query" }, limit: { type: "number", description: "Max results (default 50)" } }, required: ["selector"] },
+  },
+  {
+    name: "execute_js",
+    description: "Execute JavaScript code on the page and return the result. Use for complex interactions or data extraction.",
+    parameters: { type: "object", properties: { code: { type: "string", description: "JavaScript code to execute" } }, required: ["code"] },
+  },
+  {
+    name: "screenshot",
+    description: "Take a screenshot of the visible tab area. Returns a base64-encoded PNG data URL.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "back",
+    description: "Go back in browser history.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "forward",
+    description: "Go forward in browser history.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "click_by_text",
+    description: "Click an element by its visible text content. Best for dynamic sites where CSS selectors are unreliable.",
+    parameters: { type: "object", properties: { text: { type: "string", description: "Visible text of the element" }, elementType: { type: "string", enum: ["button", "link", "*"], description: "Type filter (default *)" } }, required: ["text"] },
+  },
+  {
+    name: "fill_form",
+    description: "Fill multiple form fields at once. Each field can be targeted by selector, label, or name.",
+    parameters: {
+      type: "object",
+      properties: {
+        fields: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              selector: { type: "string", description: "CSS selector" },
+              label: { type: "string", description: "Label text" },
+              name: { type: "string", description: "Input name attribute" },
+              value: { type: "string", description: "Value to set" },
+            },
+            required: ["value"],
+          },
+          description: "Array of fields to fill",
+        },
+      },
+      required: ["fields"],
+    },
+  },
+];
+
+async function executeChatTool(name, args, tabId) {
+  switch (name) {
+    case "read_page":      return await handlers.read_page({ tabId, format: args.format || "text" });
+    case "click":          return await handlers.click({ tabId, selector: args.selector });
+    case "type":           return await handlers.type({ tabId, selector: args.selector, text: args.text });
+    case "navigate":       return await handlers.navigate({ tabId, url: args.url, waitMs: 2000 });
+    case "scroll":         return await handlers.scroll({ tabId, direction: args.direction, pixels: args.pixels, selector: args.selector });
+    case "inspect_page":   return await handlers.inspect_page({ tabId });
+    case "get_links":      return await handlers.get_links({ tabId, filter: args.filter });
+    case "get_elements":   return await handlers.get_elements({ tabId, selector: args.selector, limit: args.limit || 50 });
+    case "execute_js":     return await handlers.execute_js({ tabId, code: args.code });
+    case "screenshot":     return await handlers.screenshot({ tabId });
+    case "back":           return await handlers.back({ tabId });
+    case "forward":        return await handlers.forward({ tabId });
+    case "click_by_text":  return await handlers.click_by_text({ tabId, text: args.text, elementType: args.elementType || "*" });
+    case "fill_form":      return await handlers.fill_form({ tabId, fields: args.fields });
+    default: throw new Error(`Unknown tool: ${name}`);
+  }
+}
+
+function truncateToolResult(result) {
+  const str = typeof result === "string" ? result : JSON.stringify(result);
+  return str.length > 8000 ? str.slice(0, 8000) + "\n...[truncated]" : str;
+}
+
+async function processChatMessage({ messages, provider, model }, tabId) {
+  const data = await chrome.storage.local.get(["chatSettings"]);
+  const chatSettings = data.chatSettings || {};
+  const apiKey = provider === "openai" ? chatSettings.openaiKey : chatSettings.claudeKey;
+  if (!apiKey) throw new Error("API key not configured. Open settings (gear icon) to add your key.");
+
+  // Get current page context
+  let pageContext = "";
+  try {
+    if (tabId) {
+      const tab = await chrome.tabs.get(tabId);
+      pageContext = `Current page: ${tab.url}\nTitle: ${tab.title}`;
+    }
+  } catch {}
+
+  const systemPrompt = `You are Browser Bros, an AI browser assistant embedded in a Chrome extension. You can interact with the user's current browser tab using the available tools.
+
+${pageContext}
+
+Guidelines:
+- Use read_page to understand what's on the current page before taking actions.
+- Use inspect_page to discover interactive elements (buttons, inputs, links).
+- For clicking, prefer click_by_text on dynamic sites, or use CSS selectors for specific elements.
+- Use fill_form for filling multiple form fields efficiently.
+- Keep responses concise and helpful.
+- When you perform actions, briefly describe what you did and the result.
+- If a tool fails, try alternative approaches (different selector strategies, etc).`;
+
+  if (provider === "openai") {
+    return await chatWithOpenAI(apiKey, model, systemPrompt, messages, tabId);
+  } else {
+    return await chatWithClaude(apiKey, model, systemPrompt, messages, tabId);
+  }
+}
+
+// ── OpenAI Chat Loop ──────────────────────────────────────────
+async function chatWithOpenAI(apiKey, model, systemPrompt, history, tabId) {
+  const openaiMessages = [
+    { role: "system", content: systemPrompt },
+    ...history.map(m => ({ role: m.role, content: m.content })),
+  ];
+  const openaiTools = CHAT_TOOLS.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+  const toolsUsed = [];
+  const MAX_ROUNDS = 12;
+
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, messages: openaiMessages, tools: openaiTools, tool_choice: "auto" }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error?.message || `OpenAI API error: ${resp.status}`);
+    }
+
+    const data = await resp.json();
+    const choice = data.choices?.[0];
+    if (!choice) throw new Error("No response from OpenAI");
+    const msg = choice.message;
+    openaiMessages.push(msg);
+
+    if (msg.tool_calls?.length) {
+      for (const tc of msg.tool_calls) {
+        let args = {};
+        try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
+        const toolName = tc.function.name;
+
+        // Notify content script
+        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_start", tool: toolName, args }).catch(() => {});
+
+        let result;
+        try {
+          result = await executeChatTool(toolName, args, tabId);
+        } catch (e) {
+          result = { error: e.message || String(e) };
+        }
+
+        const resultStr = truncateToolResult(result);
+        toolsUsed.push({ name: toolName, args });
+
+        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_done", tool: toolName }).catch(() => {});
+
+        openaiMessages.push({ role: "tool", tool_call_id: tc.id, content: resultStr });
+      }
+      continue; // Loop for next AI response
+    }
+
+    // Final text response
+    return { text: msg.content || "", toolsUsed };
+  }
+  // Hit max rounds — return partial result with continue option
+  const lastMsg = openaiMessages[openaiMessages.length - 1];
+  const partialText = lastMsg?.content || "I was still working on this but hit the tool call limit.";
+  return { text: partialText + "\n\n*Reached tool call limit. Click **Continue** to keep going.*", toolsUsed, canContinue: true };
+}
+
+// ── Claude Chat Loop ──────────────────────────────────────────
+async function chatWithClaude(apiKey, model, systemPrompt, history, tabId) {
+  const claudeTools = CHAT_TOOLS.map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }));
+
+  // Build Claude messages — convert flat history to Claude format
+  let claudeMessages = history.map(m => ({ role: m.role, content: m.content }));
+
+  const toolsUsed = [];
+  const MAX_ROUNDS = 12;
+
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: claudeMessages,
+        tools: claudeTools,
+      }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error?.message || `Claude API error: ${resp.status}`);
+    }
+
+    const data = await resp.json();
+
+    // Check for tool use in response
+    const toolUseBlocks = (data.content || []).filter(b => b.type === "tool_use");
+    const textBlocks = (data.content || []).filter(b => b.type === "text");
+    const responseText = textBlocks.map(b => b.text).join("\n");
+
+    if (toolUseBlocks.length > 0 && data.stop_reason === "tool_use") {
+      // Add assistant message with all content blocks
+      claudeMessages.push({ role: "assistant", content: data.content });
+
+      const toolResults = [];
+      for (const tu of toolUseBlocks) {
+        const toolName = tu.name;
+        const args = tu.input || {};
+
+        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_start", tool: toolName, args }).catch(() => {});
+
+        let result;
+        try {
+          result = await executeChatTool(toolName, args, tabId);
+        } catch (e) {
+          result = { error: e.message || String(e) };
+        }
+
+        const resultStr = truncateToolResult(result);
+        toolsUsed.push({ name: toolName, args });
+
+        if (tabId) chrome.tabs.sendMessage(tabId, { type: "chat_tool_done", tool: toolName }).catch(() => {});
+
+        toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: resultStr });
+      }
+
+      claudeMessages.push({ role: "user", content: toolResults });
+      continue;
+    }
+
+    // Final text response
+    return { text: responseText, toolsUsed };
+  }
+  // Hit max rounds — return partial result with continue option
+  const lastTextBlocks = (claudeMessages[claudeMessages.length - 1]?.content || []);
+  const partialText = Array.isArray(lastTextBlocks)
+    ? lastTextBlocks.filter(b => b.type === "text").map(b => b.text).join("\n")
+    : String(lastTextBlocks);
+  const displayText = partialText || "I was still working on this but hit the tool call limit.";
+  return { text: displayText + "\n\n*Reached tool call limit. Click **Continue** to keep going.*", toolsUsed, canContinue: true };
+}
 
 // ============================================================
 // Helpers
@@ -337,12 +651,21 @@ const handlers = {};
 
 // --- CORE ---
 
-handlers.navigate = async ({ url, waitMs = 1000 }) => {
-  const tab = await chrome.tabs.create({ url, active: true });
-  if (tab.status !== "complete") await waitForTabLoad(tab.id);
+handlers.navigate = async ({ tabId, url, waitMs = 1000 }) => {
+  let targetTabId = tabId;
+  if (targetTabId) {
+    // Navigate the current tab instead of opening a new one
+    await chrome.tabs.update(targetTabId, { url, active: true });
+    await waitForTabLoad(targetTabId);
+  } else {
+    // Fallback: create new tab if no current tab available
+    const tab = await chrome.tabs.create({ url, active: true });
+    targetTabId = tab.id;
+    if (tab.status !== "complete") await waitForTabLoad(targetTabId);
+  }
   if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
-  if (!isInjectableUrl(url)) return { title: tab.title || url, url, text: `[Cannot extract content from ${url}]`, meta: {} };
-  return await extractContent(tab.id, "text");
+  if (!isInjectableUrl(url)) return { title: url, url, text: `[Cannot extract content from ${url}]`, meta: {} };
+  return await extractContent(targetTabId, "text");
 };
 
 handlers.read_page = async ({ tabId, format = "text" }) => {
